@@ -1,9 +1,8 @@
-import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
+import { extractClip, combineClips } from './ffmpeg';
 
 /**
- * Render a clip from video with vertical format conversion
+ * Render a single clip from video with vertical format conversion
  */
 export async function renderClip(
   videoId: string,
@@ -13,68 +12,75 @@ export async function renderClip(
 ): Promise<string> {
   const videosDir = path.join(process.cwd(), 'videos');
   const clipsDir = path.join(process.cwd(), 'clips');
-  
-  if (!fs.existsSync(clipsDir)) {
-    fs.mkdirSync(clipsDir, { recursive: true });
-  }
 
   const inputPath = path.join(videosDir, `${videoId}.mp4`);
-  if (!fs.existsSync(inputPath)) {
-    throw new Error(`Video file not found: ${inputPath}`);
-  }
-
   const outputFileName = outputName || `${videoId}_${start}_${end}.mp4`;
   const outputPath = path.join(clipsDir, outputFileName);
 
   console.log(`Rendering clip: ${start}s - ${end}s`);
 
-  // FFmpeg command to:
-  // 1. Extract clip from start to end
-  // 2. Convert to vertical format (9:16 aspect ratio)
-  // 3. Apply smart crop to focus on the center/action
-  const duration = end - start;
-
-  await runFFmpeg([
-    '-ss', start.toString(),
-    '-i', inputPath,
-    '-t', duration.toString(),
-    '-vf', 'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920',
-    '-c:v', 'libx264',
-    '-preset', 'medium',
-    '-crf', '23',
-    '-c:a', 'aac',
-    '-b:a', '128k',
-    '-y',
-    outputPath
-  ]);
+  // Extract and convert to portrait format
+  await combineClips({
+    clipPaths: [inputPath],
+    outputPath,
+    codec: 'reencode',
+    quality: 23,
+    portrait: true,
+  });
 
   console.log(`Clip rendered to ${outputPath}`);
   return outputPath;
 }
 
 /**
- * Run FFmpeg command
+ * Render multiple clips and combine them
  */
-async function runFFmpeg(args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', args);
+export async function renderMultipleClips(
+  videoId: string,
+  clips: Array<{ start: number; end: number; title?: string }>,
+  outputName?: string
+): Promise<string> {
+  const videosDir = path.join(process.cwd(), 'videos');
+  const clipsDir = path.join(process.cwd(), 'clips');
+  const tempDir = path.join(process.cwd(), 'temp');
 
-    let stderr = '';
+  const inputPath = path.join(videosDir, `${videoId}.mp4`);
 
-    ffmpeg.stderr.on('data', (data: Buffer) => {
-      stderr += data.toString();
+  // Extract individual clips
+  const clipPaths: string[] = [];
+  const textOverlays: string[] = [];
+
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
+    const clipPath = path.join(tempDir, `${videoId}_clip_${i}_${Date.now()}.mp4`);
+
+    await extractClip({
+      videoPath: inputPath,
+      startSec: clip.start,
+      endSec: clip.end,
+      outputPath: clipPath,
+      codec: 'copy',
     });
 
-    ffmpeg.on('error', (error: Error) => {
-      reject(new Error(`FFmpeg error: ${error.message}`));
-    });
+    clipPaths.push(clipPath);
+    if (clip.title) {
+      textOverlays.push(clip.title);
+    }
+  }
 
-    ffmpeg.on('close', (code: number) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`FFmpeg exited with code ${code}\n${stderr}`));
-      }
-    });
+  // Combine clips into portrait format
+  const outputFileName = outputName || `${videoId}_combined_${Date.now()}.mp4`;
+  const outputPath = path.join(clipsDir, outputFileName);
+
+  await combineClips({
+    clipPaths,
+    outputPath,
+    codec: 'reencode',
+    quality: 23,
+    portrait: true,
+    textOverlays: textOverlays.length > 0 ? textOverlays : undefined,
   });
+
+  console.log(`Combined clips rendered to ${outputPath}`);
+  return outputPath;
 }
