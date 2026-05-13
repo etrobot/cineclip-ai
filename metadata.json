@@ -1,0 +1,6 @@
+{
+  "name": "CineClip AI",
+  "description": "A Netflix-style video clip application that extracts viral moments from YouTube links using AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
