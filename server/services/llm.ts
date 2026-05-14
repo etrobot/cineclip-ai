@@ -54,11 +54,12 @@ function parseJsonObject(content: string): unknown {
   }
 }
 
+/** Format seconds to M:SS.s (1 decimal place) — preserves subtitle timing precision */
 function formatTime(sec: number): string {
-  const s = Math.max(0, Math.floor(sec));
+  const s = Math.max(0, sec);
   const m = Math.floor(s / 60);
   const r = s % 60;
-  return `${m}:${String(r).padStart(2, '0')}`;
+  return `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`;
 }
 
 async function callLLM(
@@ -140,8 +141,9 @@ export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: str
 
   const lang = detectSubtitleLanguage(subtitles);
 
-  const subtitleLines = subtitles.map(s =>
-    `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
+  // Include 1-based index so LLM can reference exact subtitle lines
+  const subtitleLines = subtitles.map((s, i) =>
+    `#${i + 1} [${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
   );
   const maxLines = 300;
   const trimmedLines = subtitleLines.length > maxLines
@@ -160,11 +162,12 @@ export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: str
   const systemPrompt = `你是视频剪辑师。根据完整视频字幕，把视频切成若干个有独立主题的片段。
 
 【输入格式】
-每行字幕格式：[MM:SS-MM:SS] 字幕文本
+每行字幕格式：#序号 [M:SS.s-M:SS.s] 字幕文本
+时间精确到0.1秒，例如 0:20.8 表示20.8秒
 
 【输出要求】
 只输出 JSON，结构如下：
-{"clips":[{"title":"...","start_sec":0,"end_sec":120,"category":"分类"},...]}
+{"clips":[{"title":"...","start_idx":1,"end_idx":15,"category":"分类"},...]}
 
 【切片规则】
 1. 每个片段必须是一个完整、独立的主题/观点，有明确的信息量
@@ -176,8 +179,11 @@ ${titleLangRule}
    - 标题应该概括该片段的核心观点或事件，而非照搬字幕开头几个字
    - 如果标题超过25个字，精简到25字以内，不要截断
 4. category 分类：High Intensity Moments（高能时刻）、Viral Hooks（病毒式传播点）、Key Insights（核心观点）、Funny Moments（搞笑时刻）、Controversial Takes（争议话题）
-5. start_sec 和 end_sec 必须是整数（秒），必须对应输入字幕中的实际时间点
-6. 片段之间可以有小重叠（1-3秒），但不要大幅重叠
+5. start_idx 和 end_idx 必须是输入字幕的序号（#后面的数字），不是秒数！
+   - start_idx 是片段第一条字幕的序号
+   - end_idx 是片段最后一条字幕的序号
+   - 例如：片段从 #5 到 #18，则 start_idx=5, end_idx=18
+6. 片段之间可以有小重叠（1-3条字幕），但不要大幅重叠
 7. 如果视频内容连贯无明显断点，可以只切 1-2 个精华片段
 8. 不要切太多碎片，宁缺毋滥`;
 
@@ -221,6 +227,24 @@ ${subtitlesText}
   return clips;
 }
 
+/**
+ * Snap a time value to the nearest subtitle boundary.
+ * Finds the subtitle segment whose start is closest to `t` within `threshold` seconds.
+ * Returns the snapped time, or the original `t` if no subtitle is close enough.
+ */
+function snapToSubtitle(t: number, subtitles: SubtitleSegment[], threshold: number = 2): number {
+  let bestDist = Infinity;
+  let bestTime = t;
+  for (const s of subtitles) {
+    const d = Math.abs(s.start - t);
+    if (d < bestDist) {
+      bestDist = d;
+      bestTime = s.start;
+    }
+  }
+  return bestDist <= threshold ? bestTime : t;
+}
+
 function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('LLM response is not a valid object');
@@ -242,21 +266,39 @@ function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
 
     const title = typeof item.title === 'string' ? item.title.trim() : '';
     const category = typeof item.category === 'string' ? item.category.trim() : 'Highlights';
-    let start = typeof item.start_sec === 'number' ? item.start_sec : 0;
-    let end = typeof item.end_sec === 'number' ? item.end_sec : 0;
 
-    if (!start && typeof item.start === 'number') start = item.start;
-    if (!end && typeof item.end === 'number') end = item.end;
+    // ── Resolve start/end from subtitle index (preferred) or seconds (fallback) ──
+    let start: number;
+    let end: number;
+
+    if (typeof item.start_idx === 'number' && typeof item.end_idx === 'number') {
+      // LLM returned subtitle indices (1-based) → look up exact timestamps
+      const startIdx = Math.max(1, Math.min(item.start_idx, subtitles.length)) - 1;
+      const endIdx = Math.max(1, Math.min(item.end_idx, subtitles.length)) - 1;
+      start = subtitles[startIdx].start;
+      end = subtitles[endIdx].end;
+      console.log(`  [idx] start_idx=${item.start_idx} → ${start}s, end_idx=${item.end_idx} → ${end}s`);
+    } else {
+      // Legacy: LLM returned seconds → snap to nearest subtitle boundary
+      let rawStart = typeof item.start_sec === 'number' ? item.start_sec
+        : typeof item.start === 'number' ? item.start : 0;
+      let rawEnd = typeof item.end_sec === 'number' ? item.end_sec
+        : typeof item.end === 'number' ? item.end : 0;
+
+      start = snapToSubtitle(rawStart, subtitles);
+      end = snapToSubtitle(rawEnd, subtitles);
+      console.log(`  [sec] raw start=${rawStart} → snapped=${start}, raw end=${rawEnd} → snapped=${end}`);
+    }
 
     if (!title) {
       throw new Error('LLM returned clip with empty title');
     }
-    if (start >= end || end - start < 10) {
-      console.warn(`Skipping invalid clip: start=${start}, end=${end}`);
+    if (start >= end || end - start < 5) {
+      console.warn(`Skipping invalid clip: start=${start}, end=${end} (too short)`);
       continue;
     }
-    if (start < videoStart || end > videoEnd + 5) {
-      console.warn(`Skipping out-of-range clip: ${start}-${end}`);
+    if (start < videoStart - 1 || end > videoEnd + 5) {
+      console.warn(`Skipping out-of-range clip: ${start}-${end} (video: ${videoStart}-${videoEnd})`);
       continue;
     }
 
@@ -266,11 +308,12 @@ function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
       continue;
     }
 
+    // Keep precise timestamps (no floor/ceil) — FFmpeg handles fractional seconds natively
     results.push({
       title,
       category,
-      start: Math.floor(start),
-      end: Math.ceil(end),
+      start: Math.round(start * 10) / 10,  // round to 0.1s precision
+      end: Math.round(end * 10) / 10,
       description: item.description || '',
     });
   }

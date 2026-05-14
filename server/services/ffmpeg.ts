@@ -14,6 +14,12 @@ export interface ExtractClipOptions {
   quality?: number;
 }
 
+export interface SubtitleOverlay {
+  pngPath: string;
+  tStart: number;
+  tEnd: number;
+}
+
 export interface CombineClipsOptions {
   clipPaths: string[];
   outputPath: string;
@@ -21,6 +27,10 @@ export interface CombineClipsOptions {
   quality?: number;
   portrait?: boolean;
   textOverlays?: string[];
+  /** PNG overlay paths to composite on top of each clip (same length as clipPaths) */
+  pngOverlays?: string[];
+  /** Subtitle overlays with timing info for each clip */
+  subtitleOverlays?: SubtitleOverlay[][];
 }
 
 export interface VideoInfo {
@@ -141,7 +151,7 @@ export async function extractClip(options: ExtractClipOptions): Promise<string> 
 }
 
 export async function combineClips(options: CombineClipsOptions): Promise<string> {
-  const { clipPaths, outputPath, codec = 'copy', quality = 23, portrait = false, textOverlays } = options;
+  const { clipPaths, outputPath, codec = 'copy', quality = 23, portrait = false, textOverlays, pngOverlays, subtitleOverlays } = options;
 
   if (!clipPaths || clipPaths.length === 0) {
     throw new Error('No clips provided');
@@ -169,22 +179,80 @@ export async function combineClips(options: CombineClipsOptions): Promise<string
         const clipPath = clipPaths[i];
         const processedPath = path.join(tempDir, `portrait_clip_${i}_${Date.now()}.mp4`);
         const text = textOverlays?.[i]?.trim();
+        const pngOverlay = pngOverlays?.[i];
+        const subs = subtitleOverlays?.[i] || [];
 
-        let filterComplex: string;
-        if (text) {
-          const escaped = text
-            .replace(/\\/g, '\\\\')
-            .replace(/'/g, "\\'")
-            .replace(/:/g, '\\:')
-            .replace(/\[/g, '\\[')
-            .replace(/\]/g, '\\]')
-            .replace(/%/g, '\\%');
-          filterComplex = `[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[scaled];[scaled]split[orig][fg];[orig]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=luma_radius=20:luma_power=3[bg];[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto[bgfg];[bgfg]drawtext=text='${escaped}':fontcolor=white:fontsize=48:fontfile=/System/Library/Fonts/Helvetica.ttc:x=(w-text_w)/2:y=80:box=1:boxcolor=black@0.6:boxborderw=16:line_spacing=8[outv]`;
-        } else {
-          filterComplex = `[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[scaled];[scaled]split[orig][fg];[orig]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=luma_radius=20:luma_power=3[bg];[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto[outv]`;
+        // Build inputs and filter_complex
+        const inputs: string[] = ['-y', '-i', clipPath];
+        const inputLabels: string[] = ['0:v'];
+        let inputIdx = 1;
+
+        // Title PNG input
+        if (pngOverlay && fs.existsSync(pngOverlay)) {
+          inputs.push('-i', pngOverlay);
+          inputLabels.push(`${inputIdx}:v`);
+          inputIdx++;
         }
 
-        const cmd = `ffmpeg -y -i "${clipPath}" -filter_complex "${filterComplex}" -map "[outv]" -map "0:a?" -c:v libx264 -crf ${quality} -c:a aac -shortest -r 30 "${processedPath}"`;
+        // Subtitle PNG inputs
+        for (const sub of subs) {
+          if (fs.existsSync(sub.pngPath)) {
+            inputs.push('-i', sub.pngPath);
+            inputLabels.push(`${inputIdx}:v`);
+            inputIdx++;
+          }
+        }
+
+        // Build filter_complex
+        const filterParts: string[] = [];
+
+        // Base portrait conversion
+        filterParts.push('[0:v]scale=1080:-2:force_original_aspect_ratio=decrease[scaled]');
+        filterParts.push('[scaled]split[orig][fg]');
+        filterParts.push('[orig]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=luma_radius=20:luma_power=3[bg]');
+        filterParts.push('[bg][fg]overlay=(W-w)/2:(H-h)/2:format=auto[video]');
+
+        let currentLabel = 'video';
+        let overlayIdx = 1;
+
+        // Layout constants (1080x1920 portrait)
+        const VIDEO_H = Math.round((1080 * 9) / 16); // 607
+        const VIDEO_Y = Math.round((1920 - VIDEO_H) / 2); // 656
+        const VIDEO_BOTTOM = VIDEO_Y + VIDEO_H; // 1263
+        const TITLE_Y = Math.round(VIDEO_Y / 2); // 328 (title center)
+        const TITLE_H = 120;
+        const SUBTITLE_Y = VIDEO_BOTTOM + Math.round((1920 - VIDEO_BOTTOM) / 2) - 60; // 1590 (subtitle center)
+        const SUBTITLE_H = 140;
+
+        // Overlay title PNG (full duration, vertically centered in top area)
+        if (pngOverlay && fs.existsSync(pngOverlay)) {
+          const nextLabel = subs.length > 0 ? 'with_title' : 'outv';
+          const titleTopY = Math.round(TITLE_Y - TITLE_H / 2); // 328 - 60 = 268
+          filterParts.push(`[${currentLabel}][${overlayIdx}:v]overlay=0:${titleTopY}:format=auto[${nextLabel}]`);
+          currentLabel = nextLabel;
+          overlayIdx++;
+        }
+
+        // Overlay subtitle PNGs (timed, vertically centered in bottom area)
+        for (let j = 0; j < subs.length; j++) {
+          const sub = subs[j];
+          if (!fs.existsSync(sub.pngPath)) continue;
+          const subTopY = Math.round(SUBTITLE_Y - SUBTITLE_H / 2); // 1590 - 70 = 1520
+          const nextLabel = j === subs.length - 1 ? 'outv' : `sub_${j}`;
+          filterParts.push(
+            `[${currentLabel}][${overlayIdx}:v]overlay=0:${subTopY}:enable='between(t\\,${sub.tStart.toFixed(2)}\\,${sub.tEnd.toFixed(2)})':format=auto[${nextLabel}]`
+          );
+          currentLabel = nextLabel;
+          overlayIdx++;
+        }
+
+        // If no overlays at all, label the output
+        if (filterParts.length === 4 && currentLabel === 'video') {
+          filterParts.push('[video]copy[outv]');
+        }
+
+        const filterComplex = filterParts.join(';');
+        const cmd = `ffmpeg ${inputs.join(' ')} -filter_complex "${filterComplex}" -map "[outv]" -map "0:a?" -c:v libx264 -crf ${quality} -c:a aac -shortest -r 30 "${processedPath}"`;
         await execAsync(cmd);
 
         if (!fs.existsSync(processedPath)) {

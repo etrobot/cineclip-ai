@@ -4,7 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --port=3000 --host=0.0.0.0",
+    "dev": "concurrently \"pnpm run server:dev\" \"pnpm run dev:vite\" --names \"SERVER,CLIENT\" --prefix-colors \"blue,green\"",
+    "dev:vite": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
@@ -12,23 +13,26 @@
     "server:dev": "tsx watch server/index.ts",
     "server:build": "tsc -p server/tsconfig.json",
     "server:start": "node dist/server/index.js",
-    "start": "concurrently \"npm run server:dev\" \"npm run dev\" --names \"SERVER,CLIENT\" --prefix-colors \"blue,green\""
+    "start": "pnpm run dev"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
     "@tsparticles/all": "^3.9.1",
     "@tsparticles/react": "^3.0.0",
     "@tsparticles/slim": "^3.9.1",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.0.4",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "puppeteer-core": "^24.43.1",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "tsparticles": "^3.9.1",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "ws": "^8.20.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
