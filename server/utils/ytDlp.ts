@@ -13,12 +13,16 @@ function resolveYtDlpBin(): string {
     return envBin;
   }
 
-  // Try common locations
+  // Resolve project root (works from both server/ and root)
+  const projectRoot = path.resolve(__dirname, '..', '..');
+
+  // Try common locations (priority order)
   const commonPaths = [
+    path.join(projectRoot, '.venv', 'bin', 'yt-dlp'), // uv-managed venv
+    path.resolve(process.cwd(), '.venv', 'bin', 'yt-dlp'), // cwd venv
     'yt-dlp', // System PATH
     '/usr/local/bin/yt-dlp',
     '/usr/bin/yt-dlp',
-    path.resolve(process.cwd(), '.venv', 'bin', 'yt-dlp'),
   ];
 
   for (const binPath of commonPaths) {

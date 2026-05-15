@@ -30,26 +30,22 @@
 ## 前置要求
 
 1. **Node.js** >= 18
-2. **yt-dlp** - YouTube 视频下载工具
+2. **uv** - Python 虚拟环境管理工具 (用于安装 yt-dlp)
    ```bash
    # macOS
-   brew install yt-dlp
-   
-   # Linux
-   pip install yt-dlp
-   
-   # Windows
-   # 从 https://github.com/yt-dlp/yt-dlp/releases 下载
-   ```
+   brew install uv
 
+   # Linux
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
 3. **FFmpeg** - 视频处理工具
    ```bash
    # macOS
    brew install ffmpeg
-   
+
    # Linux
    sudo apt install ffmpeg
-   
+
    # Windows
    # 从 https://ffmpeg.org/download.html 下载
    ```
@@ -66,28 +62,47 @@
    cd <project-folder>
    ```
 
-2. **安装依赖**
+2. **一键安装所有依赖（推荐）**
    ```bash
-   npm install
+   chmod +x scripts/install-deps.sh
+   ./scripts/install-deps.sh
+   ```
+   该脚本会自动：
+   - 安装 pnpm 依赖（Node.js）
+   - 安装 uv 并创建虚拟环境
+   - 通过 uv 安装 yt-dlp
+   - 自动配置 `YT_DLP_BIN` 环境变量
+
+3. **或手动安装**
+   ```bash
+   # Node.js 依赖
+   pnpm install
+
+   # Python 依赖（yt-dlp）
+   uv venv .venv --no-project
+   uv pip install --python .venv yt-dlp
    ```
 
-3. **配置环境变量**
+4. **配置环境变量**
    ```bash
    cp .env.example .env
    ```
-   
+
    编辑 `.env` 文件，填入你的配置：
    ```env
    # OpenAI API 配置
    OPENAI_BASE_URL="https://api.openai.com/v1"
    OPENAI_API_KEY="sk-your-api-key-here"
    OPENAI_MODEL="gpt-4o-mini"
-   
+
    # 服务器端口
    PORT=3001
-   
+
    # 前端 API 地址
    VITE_API_URL=http://localhost:3001
+
+   # yt-dlp 二进制路径（如果使用 uv 安装则自动配置）
+   YT_DLP_BIN=./.venv/bin/yt-dlp
    ```
 
 ## 运行项目
@@ -215,9 +230,11 @@
 ## 常见问题
 
 ### 1. yt-dlp 找不到
-确保 yt-dlp 已安装并在系统 PATH 中，或在 `.env` 中指定路径：
+如果使用一键安装脚本，yt-dlp 会自动安装到 `.venv/bin/yt-dlp`。
+
+手动安装时确保 yt-dlp 在系统 PATH 中，或在 `.env` 中指定路径：
 ```env
-YT_DLP_BIN=/path/to/yt-dlp
+YT_DLP_BIN=./.venv/bin/yt-dlp
 ```
 
 ### 2. 无法下载某些视频

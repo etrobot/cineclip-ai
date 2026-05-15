@@ -1,5 +1,42 @@
 # 配置指南
 
+## 环境准备
+
+### 推荐：一键安装所有依赖
+
+```bash
+chmod +x scripts/install-deps.sh
+./scripts/install-deps.sh
+```
+
+该脚本会自动安装 Node.js 依赖（pnpm）和通过 uv 安装 yt-dlp 到 `.venv/` 目录。
+
+### 手动安装
+
+1. **Node.js 依赖**
+   ```bash
+   pnpm install
+   ```
+
+2. **yt-dlp（通过 uv）**
+   ```bash
+   # 确保已安装 uv
+   # macOS: brew install uv
+   # Linux: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   uv venv .venv --no-project
+   uv pip install --python .venv yt-dlp
+   ```
+
+3. **FFmpeg**
+   ```bash
+   # macOS
+   brew install ffmpeg
+
+   # Linux
+   sudo apt install ffmpeg
+   ```
+
 ## API 配置
 
 ### 选项 1: OpenAI 官方 API

@@ -1,0 +1,11 @@
+[project]
+name = "cineclip-ai"
+version = "1.0.0"
+description = "YouTube视频智能剪辑工具 - yt-dlp依赖管理"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["ruff", "mypy"]
+
+[tool.uv.sources]
+yt-dlp = { git = "https://github.com/yt-dlp/yt-dlp.git", tag = "2025.05.18" }

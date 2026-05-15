@@ -3,6 +3,9 @@ node_modules/
 .pnp
 .pnp.js
 
+# uv-managed Python virtual environment
+.venv/
+
 # Testing
 coverage/
 

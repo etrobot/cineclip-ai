@@ -54,7 +54,7 @@
 | Express | 4.21 | HTTP 服务器 |
 | TypeScript | ~5.8 | 类型系统 |
 | ws | 8.20 | WebSocket 服务 |
-| yt-dlp | 系统安装 | YouTube 视频/字幕下载 |
+| uv + yt-dlp | 系统/uv | YouTube 视频/字幕下载 |
 | FFmpeg | 系统安装 | 视频剪辑与处理 |
 | Puppeteer Core | 24.43 | 渲染覆盖层图片 |
 | OpenAI API | - | LLM 内容分析 |
@@ -546,7 +546,7 @@ SSE 流式传输进度事件，事件格式：
 | 依赖 | 安装方式 |
 |------|----------|
 | Node.js >= 18 | [官网下载](https://nodejs.org/) |
-| yt-dlp | `brew install yt-dlp` / `pip install yt-dlp` |
+| uv (Python 包管理) | `brew install uv` / [官方脚本](https://docs.astral.sh/uv/getting-started/installation/) |
 | FFmpeg | `brew install ffmpeg` / `sudo apt install ffmpeg` |
 | OpenAI API Key | [platform.openai.com](https://platform.openai.com/api-keys) |
 | **可选** Puppeteer 所需的 Chrome | 需 macOS `/Applications/Google Chrome.app/` |
@@ -557,17 +557,30 @@ SSE 流式传输进度事件，事件格式：
 # 1. 克隆项目
 git clone <repo-url> && cd cineclip-ai
 
-# 2. 安装依赖（使用 pnpm）
-pnpm install
+# 2. 一键安装所有依赖（Node.js + yt-dlp via uv）
+chmod +x scripts/install-deps.sh
+./scripts/install-deps.sh
 
 # 3. 配置环境变量
 cp .env.example .env
 # 编辑 .env，填入 OPENAI_API_KEY 等配置
+# 通常 YT_DLP_BIN 会自动设置为 .venv/bin/yt-dlp
 
 # 4. 启动开发服务器（同时启动前后端）
 pnpm dev
 # 前端: http://localhost:3000
 # 后端: http://localhost:3001
+```
+
+### 手动安装（不推荐）
+
+```bash
+# Node.js 依赖
+pnpm install
+
+# yt-dlp（通过 uv）
+uv venv .venv --no-project
+uv pip install --python .venv yt-dlp
 ```
 
 ### 生产构建
@@ -597,8 +610,8 @@ PORT=3001
 VITE_API_URL=http://localhost:3001
 
 # yt-dlp 配置（可选）
-HTTPS_PROXY=http://proxy.example.com:8080
-YT_DLP_BIN=/usr/local/bin/yt-dlp
+# 如果使用 uv 安装（推荐），会自动安装到 .venv/bin/yt-dlp
+# YT_DLP_BIN=.venv/bin/yt-dlp
 YT_DLP_COOKIES_BROWSER=chrome
 
 # 代理设置
@@ -704,9 +717,11 @@ FFmpeg 的 `drawtext` 滤镜对中文支持不佳（字体渲染、换行控制�
 ## 常见问题
 
 ### 1. yt-dlp 找不到
-确保 yt-dlp 已安装并在 PATH 中，或在 `.env` 中指定：
+如果使用一键安装脚本，yt-dlp 会自动安装到 `.venv/bin/yt-dlp`。
+
+手动安装时确保 yt-dlp 在系统 PATH 中，或在 `.env` 中指定路径：
 ```env
-YT_DLP_BIN=/path/to/yt-dlp
+YT_DLP_BIN=.venv/bin/yt-dlp
 ```
 
 ### 2. Puppeteer 找不到 Chrome
