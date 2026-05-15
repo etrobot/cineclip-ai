@@ -147,7 +147,7 @@ export async function getVideoWithSubtitles(videoId: string): Promise<VideoMetad
   try {
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     const proxy = getProxy();
-    const commonArgs: string[] = ['--no-warnings', '--no-call-home'];
+    const commonArgs: string[] = ['--no-warnings'];
     if (proxy) {
       commonArgs.push('--proxy', proxy);
     }
@@ -225,7 +225,7 @@ export async function getVideoWithSubtitles(videoId: string): Promise<VideoMetad
 export async function downloadVideo(videoId: string): Promise<string> {
   const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const proxy = getProxy();
-  const commonArgs: string[] = ['--no-warnings', '--no-call-home'];
+  const commonArgs: string[] = ['--no-warnings'];
   if (proxy) {
     commonArgs.push('--proxy', proxy);
   }
