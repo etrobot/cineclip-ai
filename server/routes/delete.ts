@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
+import { refreshClipsJson } from './gallery';
 
 export const deleteRoute = Router();
 
@@ -39,6 +40,9 @@ deleteRoute.post('/', async (req, res) => {
         deleted.push(thumbFilePath);
       }
     }
+
+    // Update clips.json after deletion
+    setImmediate(() => refreshClipsJson());
 
     res.json({ success: true, deleted });
   } catch (error: any) {

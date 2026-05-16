@@ -10,8 +10,12 @@ import {
   subscribeProgress,
   generateJobId,
   deleteClip,
+  fetchGallery,
+  listClips,
   type Clip,
   type ProgressEvent,
+  type GalleryGroup,
+  type GalleryClip,
 } from "./api/client";
 import { useRenderQueue, type QueuedClip } from "./hooks/useRenderQueue";
 import { usePersistedClips } from "./hooks/usePersistedClips";
@@ -48,6 +52,7 @@ export default function App() {
     thumbnail: string;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [serverClipsLoaded, setServerClipsLoaded] = useState(false);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const { clips: queuedClips, startQueue, updateClip, removeClip } = useRenderQueue();
   const { persisted, save, clear } = usePersistedClips();
@@ -71,6 +76,60 @@ export default function App() {
       }
     }
   }, [persisted]);
+
+  // Load existing clips from server on mount (if no localStorage data)
+  useEffect(() => {
+    if (serverClipsLoaded) return;
+
+    listClips()
+      .then((data) => {
+        setServerClipsLoaded(true);
+        if (data.clips.length === 0) return;
+
+        // Convert server clips to ClipItem[] and QueuedClip[]
+        const clipItems: ClipItem[] = data.clips.map((c) => ({
+          id: c.id,
+          videoId: c.videoId,
+          title: c.fileName.replace(/\.mp4$/, '').replace(/_/g, ' '),
+          category: 'Clips',
+          duration: c.duration,
+          thumbnail: c.thumbnailUrl || '',
+          start: c.start,
+          end: c.end,
+        }));
+
+        const queuedItems: QueuedClip[] = data.clips.map((c) => ({
+          id: c.id,
+          videoId: c.videoId,
+          title: c.fileName.replace(/\.mp4$/, '').replace(/_/g, ' '),
+          category: 'Clips',
+          duration: c.duration,
+          thumbnail: c.thumbnailUrl || '',
+          start: c.start,
+          end: c.end,
+          status: 'done' as const,
+          progress: 100,
+          stage: '',
+          clipUrl: c.clipUrl,
+          renderedThumbnailUrl: c.thumbnailUrl,
+        }));
+
+        // Only set if we don't already have data from localStorage
+        setAnalyzedClips((prev) => {
+          if (prev.length > 0) return prev;
+          return groupClipsByVideoFlat(clipItems);
+        });
+
+        // Add server clips to the render queue as "done"
+        for (const q of queuedItems) {
+          updateClip(q.id, q);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to load existing clips from server:', err);
+        setServerClipsLoaded(true);
+      });
+  }, [serverClipsLoaded]);
 
   // Persist whenever data changes (debounced to avoid excessive writes)
   useEffect(() => {
@@ -152,7 +211,6 @@ export default function App() {
 
   const getStageLabel = (stage: string, message: string): string => {
     const stageMap: Record<string, string> = {
-      extracting: "Getting Subtitles",
       subtitles: "Getting Subtitles",
       analyzing: "Analyzing",
       splitting: "Splitting",
@@ -160,7 +218,11 @@ export default function App() {
       complete: "Done",
       error: "Error",
     };
-    return message || stageMap[stage] || stage;
+    // Prefer explicit message from server; only fall back to stageMap for known stages
+    // This avoids showing "Getting Subtitles" or "Done" multiple times when
+    // the server sends more specific messages like "Extracting video ID..." or "Subtitles fetched"
+    if (message) return message;
+    return stageMap[stage] || stage;
   };
 
   const startAnalysis = useCallback(
@@ -182,6 +244,8 @@ export default function App() {
         },
         () => {
           console.log("Job completed");
+          // Don't reset status here — the 'complete' stage already set it to "Done"
+          // Just ensure progress is at 100
           setProgress(100);
         },
         (message: string) => {
@@ -242,10 +306,8 @@ export default function App() {
   }, [clear]);
 
   const handleGoToGallery = useCallback(() => {
-    if (analyzedClips.length > 0) {
-      setView("results");
-    }
-  }, [analyzedClips]);
+    setView("results");
+  }, []);
 
   const handleDeleteClip = useCallback(
     async (clipId: string) => {
@@ -362,7 +424,7 @@ export default function App() {
             </nav>
 
             {/* Clip Rows */}
-            <div className="pt-8 space-y-12">
+            <div className="pt-8 max-w-4xl mx-auto px-6 space-y-6">
               {hasClips ? (
                 groupedQueuedVideos.map((row) =>
                   row.items.length > 0 ? (

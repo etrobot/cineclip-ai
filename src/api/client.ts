@@ -190,6 +190,111 @@ export async function deleteClip(clipUrl: string, thumbnailUrl?: string): Promis
   return response.json();
 }
 
+export interface GridResponse {
+  gridUrl: string;
+}
+
+/**
+ * Generate a multi-frame grid screenshot for a clip
+ */
+export async function generateGrid(
+  clipUrl: string,
+  options?: { fps?: number; diffThreshold?: number; maxGridSize?: number }
+): Promise<GridResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/grid`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ clipUrl, ...options }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to generate grid');
+  }
+
+  return response.json();
+}
+
+export interface GalleryClip {
+  id: string;
+  videoId: string;
+  fileName: string;
+  clipUrl: string;
+  thumbnailUrl: string | null;
+  start: number;
+  end: number;
+  duration: string;
+  title: string;
+  size: number;
+}
+
+export interface GalleryGroup {
+  videoId: string;
+  title: string;
+  thumbnailUrl: string | null;
+  clips: GalleryClip[];
+}
+
+export interface GalleryResponse {
+  updatedAt: string | null;
+  groups: GalleryGroup[];
+}
+
+/**
+ * Fetch gallery state from server (reads clips.json)
+ */
+export async function fetchGallery(): Promise<GalleryResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/gallery`);
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to fetch gallery');
+  }
+  return response.json();
+}
+
+/**
+ * Trigger a scan to refresh clips.json
+ */
+export async function refreshGallery(): Promise<GalleryResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/gallery/refresh`, { method: 'POST' });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to refresh gallery');
+  }
+  return response.json();
+}
+
+/**
+ * List all existing clips from the server
+ */
+export interface ListClipItem {
+  id: string;
+  videoId: string;
+  fileName: string;
+  clipUrl: string;
+  thumbnailUrl: string | undefined;
+  start: number;
+  end: number;
+  duration: string;
+  size: number;
+}
+
+export interface ListClipsResponse {
+  clips: ListClipItem[];
+  groups: { videoId: string; clips: ListClipItem[] }[];
+}
+
+export async function listClips(): Promise<ListClipsResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/clips/list`);
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to list clips');
+  }
+  return response.json();
+}
+
 /**
  * Health check
  */

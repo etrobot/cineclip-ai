@@ -32,9 +32,14 @@ export function useRenderQueue() {
 
   const updateClip = useCallback(
     (clipId: string, patch: Partial<QueuedClip>) => {
-      syncRef((prev) =>
-        prev.map((c) => (c.id === clipId ? { ...c, ...patch } : c))
-      );
+      syncRef((prev) => {
+        const exists = prev.find((c) => c.id === clipId);
+        if (exists) {
+          return prev.map((c) => (c.id === clipId ? { ...c, ...patch } : c));
+        }
+        // If clip doesn't exist yet, add it (upsert behavior)
+        return [...prev, { id: clipId, ...patch } as QueuedClip];
+      });
     },
     [syncRef]
   );

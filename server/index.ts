@@ -9,6 +9,8 @@ import { downloadRoute } from './routes/download';
 import { renderRoute } from './routes/render';
 import { deleteRoute } from './routes/delete';
 import { testRoute } from './routes/test';
+import { gridRoute } from './routes/grid';
+import { galleryRoute } from './routes/gallery';
 import { wsManager } from './services/wsManager';
 
 dotenv.config({ override: true });
@@ -41,6 +43,8 @@ app.use('/api/download', downloadRoute);
 app.use('/api/render', renderRoute);
 app.use('/api/delete', deleteRoute);
 app.use('/api/test', testRoute);
+app.use('/api/grid', gridRoute);
+app.use('/api/gallery', galleryRoute);
 
 // Health check
 app.get('/health', (req, res) => {

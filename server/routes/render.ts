@@ -1,8 +1,9 @@
 import { Router } from 'express';
 import { renderClip } from '../services/render';
-import { generateThumbnail } from '../services/ffmpeg';
+import { generateThumbnailFromGrid } from '../services/grid';
 import { downloadVideo } from '../services/youtube';
 import { progressEmitter } from '../services/progressEmitter';
+import { refreshClipsJson } from './gallery';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -52,32 +53,34 @@ renderRoute.post('/', async (req, res) => {
       progressEmitter.emitProgress(jid, 'downloading', 25, 'Video already cached');
     }
 
-    // Step 1: Generate real thumbnail from the clip's mid time
-    progressEmitter.emitProgress(jid, 'thumbnail', 30, 'Generating thumbnail...');
+    // Step 1: Render the clip first (needed for grid-based thumbnail)
+    progressEmitter.emitProgress(jid, 'rendering', 30, 'Extracting clip...');
+    const outputPath = await renderClip(videoId, start, end, outputName, title, subtitles);
+
+    progressEmitter.emitProgress(jid, 'rendering', 70, 'Clip rendered');
+
+    // Step 2: Generate thumbnail from grid (1:1 first cell)
+    progressEmitter.emitProgress(jid, 'thumbnail', 75, 'Generating thumbnail from grid...');
     const safeStart = String(start).replace(/\./g, 'p');
     const safeEnd = String(end).replace(/\./g, 'p');
     const thumbFileName = outputName
       ? `${path.parse(outputName).name}.jpg`
       : `${videoId}_${safeStart}_${safeEnd}.jpg`;
     const thumbPath = path.join(thumbsDir, thumbFileName);
-    const thumbnailMidTime = Math.round((start + end) / 2);
 
     try {
-      await generateThumbnail(videoPath, thumbPath, thumbnailMidTime);
+      await generateThumbnailFromGrid(outputPath, thumbPath);
     } catch (thumbErr) {
-      console.warn('Thumbnail generation failed, continuing without it:', thumbErr);
+      console.warn('Thumbnail generation from grid failed, continuing without it:', thumbErr);
     }
 
-    progressEmitter.emitProgress(jid, 'thumbnail', 40, 'Thumbnail generated');
-
-    // Step 2: Render the clip
-    progressEmitter.emitProgress(jid, 'rendering', 45, 'Extracting clip...');
-    const outputPath = await renderClip(videoId, start, end, outputName, title, subtitles);
-
-    progressEmitter.emitProgress(jid, 'rendering', 90, 'Clip rendered');
+    progressEmitter.emitProgress(jid, 'thumbnail', 90, 'Thumbnail generated');
 
     // Complete
     progressEmitter.emitProgress(jid, 'complete', 100, 'Render complete');
+
+    // Update clips.json in background
+    setImmediate(() => refreshClipsJson());
 
     const thumbnailUrl = `/api/clips/thumbnails/${thumbFileName}`;
     const clipFileName = path.basename(outputPath);
