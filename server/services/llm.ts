@@ -151,13 +151,7 @@ export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: str
     : subtitleLines;
   const subtitlesText = trimmedLines.join('\n');
 
-  const titleLangRule = lang === 'en'
-    ? `   - 必须用简体中文写标题，8-25个字
-   - 把英文字幕的核心内容翻译概括成中文标题，不要夹杂英文
-   - 例如：字幕说 "We're winning Michigan by a lot"，标题写 "特朗普宣布在密歇根大幅领先"`
-    : `   - 用简体中文写标题，8-25个字
-   - 必须具体、有信息量，让读者一眼知道核心内容
-   - 优先使用字幕中的核心名词、动词、观点`;
+
 
   const systemPrompt = `你是视频剪辑师。根据完整视频字幕，把视频切成若干个有独立主题的片段。
 
@@ -171,28 +165,24 @@ export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: str
 
 【切片规则】
 1. 每个片段必须是一个完整、独立的主题/观点，有明确的信息量
-2. 片段时长建议在 30-120 秒之间
-3. 标题要求：
-${titleLangRule}
+2. 标题要求：
    - 禁止空洞词汇："精彩片段"、"视频节选"、"主播谈XX"、"讨论"、"聊聊"
    - 禁止以"片段"、"节选"、"剪辑"结尾
    - 标题应该概括该片段的核心观点或事件，而非照搬字幕开头几个字
-   - 如果标题超过25个字，精简到25字以内，不要截断
-4. category 分类：High Intensity Moments（高能时刻）、Viral Hooks（病毒式传播点）、Key Insights（核心观点）、Funny Moments（搞笑时刻）、Controversial Takes（争议话题）
-5. start_idx 和 end_idx 必须是输入字幕的序号（#后面的数字），不是秒数！
+3. start_idx 和 end_idx 必须是输入字幕的序号（#后面的数字），不是秒数！
    - start_idx 是片段第一条字幕的序号
    - end_idx 是片段最后一条字幕的序号
    - 例如：片段从 #5 到 #18，则 start_idx=5, end_idx=18
-6. 片段之间可以有小重叠（1-3条字幕），但不要大幅重叠
-7. 如果视频内容连贯无明显断点，可以只切 1-2 个精华片段
-8. 不要切太多碎片，宁缺毋滥`;
+4. 片段之间可以有小重叠（1-3条字幕），但不要大幅重叠
+5. 如果视频内容连贯无明显断点，可以只切 1-2 个精华片段
+6. 不要切太多碎片，宁缺毋滥`;
 
   const userPrompt = `整支视频标题：${videoTitle}
 
 完整字幕（共 ${subtitles.length} 条）：
 ${subtitlesText}
 
-请按规则切成若干片段，输出JSON。标题必须用简体中文，概括核心内容。`;
+请按规则切成若干片段，输出JSON。`;
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -276,7 +266,11 @@ function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
       const startIdx = Math.max(1, Math.min(item.start_idx, subtitles.length)) - 1;
       const endIdx = Math.max(1, Math.min(item.end_idx, subtitles.length)) - 1;
       start = subtitles[startIdx].start;
-      end = subtitles[endIdx].end;
+      // End = next subtitle's start (preserves last subtitle display + natural gap)
+      // Falls back to last subtitle's end only when there is no next subtitle
+      end = endIdx < subtitles.length - 1
+        ? subtitles[endIdx + 1].start
+        : subtitles[endIdx].end;
       console.log(`  [idx] start_idx=${item.start_idx} → ${start}s, end_idx=${item.end_idx} → ${end}s`);
     } else {
       // Legacy: LLM returned seconds → snap to nearest subtitle boundary
