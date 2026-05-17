@@ -3,7 +3,9 @@ import { renderClip } from '../services/render';
 import { generateThumbnailFromGrid } from '../services/grid';
 import { downloadVideo } from '../services/youtube';
 import { progressEmitter } from '../services/progressEmitter';
-import { refreshClipsJson } from './gallery';
+import { db } from '../db';
+import { originalPost, clips as clipsTable } from '../db/schema';
+import { eq } from 'drizzle-orm';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -45,7 +47,27 @@ renderRoute.post('/', async (req, res) => {
 
     // Step 0: Download video if not already cached
     const videoPath = path.join(videosDir, `${videoId}.mp4`);
-    if (!fs.existsSync(videoPath)) {
+    let needDownload = true;
+    if (fs.existsSync(videoPath)) {
+      // Validate file is a proper video (not corrupt/incomplete)
+      const stats = fs.statSync(videoPath);
+      if (stats.size > 1024 * 1024) {
+        try {
+          const fd = fs.openSync(videoPath, 'r');
+          const buf = Buffer.alloc(65536);
+          const bytesRead = fs.readSync(fd, buf, 0, 65536, 0);
+          fs.closeSync(fd);
+          const nullCount = buf.slice(0, bytesRead).filter(b => b === 0).length;
+          if (nullCount / bytesRead < 0.1 && (buf.includes('mdat') || buf.includes('moov'))) {
+            needDownload = false;
+          }
+        } catch {
+          // Validation failed, re-download
+        }
+      }
+    }
+    
+    if (needDownload) {
       progressEmitter.emitProgress(jid, 'downloading', 5, 'Downloading video...');
       await downloadVideo(videoId);
       progressEmitter.emitProgress(jid, 'downloading', 25, 'Video downloaded');
@@ -79,20 +101,34 @@ renderRoute.post('/', async (req, res) => {
     // Complete
     progressEmitter.emitProgress(jid, 'complete', 100, 'Render complete');
 
-    // Save clip metadata (title from LLM) for scan-clips to pick up
-    const metaDir = path.join(process.cwd(), 'clips', 'meta');
-    if (!fs.existsSync(metaDir)) {
-      fs.mkdirSync(metaDir, { recursive: true });
-    }
-    const metaPath = path.join(metaDir, `${path.basename(outputPath, '.mp4')}.json`);
-    fs.writeFileSync(metaPath, JSON.stringify({ title: title || '' }));
-
-    // Update clips.json in background
-    setImmediate(() => refreshClipsJson());
-
     const thumbnailUrl = `/api/clips/thumbnails/${thumbFileName}`;
     const clipFileName = path.basename(outputPath);
     const clipUrl = `/api/clips/${clipFileName}`;
+
+    // Save clip metadata to database
+    const postUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const post = await db.query.originalPost.findFirst({
+      where: (p, { eq }) => eq(p.postUrl, postUrl),
+    });
+
+    if (post) {
+      const durationSec = end - start;
+      const mins = Math.floor(durationSec / 60);
+      const secs = Math.floor(durationSec % 60);
+      const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
+
+      await db.insert(clipsTable).values({
+        originalPostId: post.id,
+        fileName: clipFileName,
+        clipUrl,
+        thumbnailUrl,
+        startTime: start,
+        endTime: end,
+        duration: durationStr,
+        title: title || clipFileName,
+        size: fs.statSync(outputPath).size,
+      });
+    }
 
     res.json({ outputPath, clipUrl, thumbnailUrl, jobId: jid });
   } catch (error: any) {

@@ -5,6 +5,7 @@ import { runYtDlp } from '../utils/ytDlp';
 export interface VideoMetadata {
   videoId: string;
   title: string;
+  description: string;
   duration: number;
   thumbnail: string;
   publishedAt: string;
@@ -79,6 +80,7 @@ export function parseVTT(content: string): SubtitleSegment[] {
   }
 
   // Pass 2: Remove overlapping prefix between adjacent subtitles
+  // Preserve music/sound markers (e.g. "[music]") — do NOT merge or drop them
   const result: SubtitleSegment[] = [];
   for (let i = 0; i < unique.length; i++) {
     const item = unique[i];
@@ -87,6 +89,13 @@ export function parseVTT(content: string): SubtitleSegment[] {
     if (result.length > 0) {
       const prevText = result[result.length - 1].text;
 
+      // music 标记段落完全保留，不做任何去重/跳过处理
+      if (isMusicMarker(currentText)) {
+        result.push({ start: item.start, end: item.end, text: currentText });
+        continue;
+      }
+
+      // Never skip text contained in previous text (avoid duplication)
       if (currentText && prevText.includes(currentText)) continue;
 
       if (currentText.startsWith(prevText)) {
@@ -102,6 +111,13 @@ export function parseVTT(content: string): SubtitleSegment[] {
   }
 
   return result;
+}
+
+/**
+ * Check if text represents a music/sound marker (e.g. "[music]", ">>[Music]").
+ */
+function isMusicMarker(text: string): boolean {
+  return /\bmusic\b/i.test(text);
 }
 
 /**
@@ -208,6 +224,7 @@ export async function getVideoWithSubtitles(videoId: string): Promise<VideoMetad
     return {
       videoId,
       title: info.title,
+      description: info.description || '',
       duration: info.duration || 0,
       thumbnail: info.thumbnail || '',
       publishedAt: info.upload_date || new Date().toISOString(),
@@ -218,6 +235,35 @@ export async function getVideoWithSubtitles(videoId: string): Promise<VideoMetad
     return null;
   }
 }
+
+function isValidVideoFile(filePath: string): boolean {
+  try {
+    const stats = fs.statSync(filePath);
+    if (stats.size < 1024 * 1024) return false; // Less than 1MB is suspicious
+    
+    // Check first 64KB for null byte ratio
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(65536);
+    const bytesRead = fs.readSync(fd, buf, 0, 65536, 0);
+    fs.closeSync(fd);
+    
+    const nullCount = buf.slice(0, bytesRead).filter(b => b === 0).length;
+    const nullRatio = nullCount / bytesRead;
+    if (nullRatio > 0.1) return false; // More than 10% null bytes is corrupted
+    
+    // Check for mdat or moov signature (MP4 container)
+    const header = buf.slice(0, 65536);
+    return header.includes(Buffer.from('mdat')) || header.includes(Buffer.from('moov'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * In-memory lock to prevent concurrent downloads of the same video.
+ * Maps videoId to a promise that resolves when download completes.
+ */
+const downloadLocks = new Map<string, Promise<string>>();
 
 /**
  * Download video file
@@ -237,22 +283,90 @@ export async function downloadVideo(videoId: string): Promise<string> {
 
   const outputPath = path.join(videosDir, `${videoId}.mp4`);
 
-  // Check if already downloaded
-  if (fs.existsSync(outputPath)) {
+  // Check if already downloaded and valid
+  if (fs.existsSync(outputPath) && isValidVideoFile(outputPath)) {
     console.log(`Video ${videoId} already downloaded`);
     return outputPath;
   }
 
-  console.log(`Downloading video ${videoId}...`);
+  // If another request is already downloading this video, wait for it
+  const existingLock = downloadLocks.get(videoId);
+  if (existingLock) {
+    console.log(`Video ${videoId} download already in progress, waiting...`);
+    return existingLock;
+  }
 
-  await runYtDlp([
-    ...commonArgs,
-    '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-    '--merge-output-format', 'mp4',
-    '-o', outputPath,
-    videoUrl,
-  ]);
+  // Create a new download promise and store it in the lock map
+  const downloadPromise = (async (): Promise<string> => {
+    try {
+      // Double-check after acquiring the lock
+      if (fs.existsSync(outputPath) && isValidVideoFile(outputPath)) {
+        console.log(`Video ${videoId} already downloaded (after lock)`);
+        return outputPath;
+      }
 
-  console.log(`Video downloaded to ${outputPath}`);
-  return outputPath;
+      // Remove corrupted file if exists
+      if (fs.existsSync(outputPath)) {
+        console.warn(`Video ${videoId} file is corrupted, re-downloading...`);
+        fs.unlinkSync(outputPath);
+      }
+
+      console.log(`Downloading video ${videoId}...`);
+
+      // Use yt-dlp's default template to avoid merge issues, then rename
+      const tempOutputTemplate = path.join(videosDir, `%(id)s.%(ext)s`);
+
+      await runYtDlp([
+        ...commonArgs,
+        '-f', 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/best[ext=mp4][vcodec^=avc1]/best[ext=mp4]/best',
+        '--merge-output-format', 'mp4',
+        '-o', tempOutputTemplate,
+        videoUrl,
+      ]);
+
+      // Find the downloaded file (yt-dlp may add suffixes)
+      const allMp4Files = fs.readdirSync(videosDir)
+        .filter(f => f.startsWith(videoId) && f.endsWith('.mp4'));
+
+      // Exclude yt-dlp temporary fragment files (e.g. .f137.mp4, .f140.mp4)
+      const tempFragmentRegex = /\.f\d+\.mp4$/;
+      const downloadedFiles = allMp4Files
+        .filter(f => !tempFragmentRegex.test(f))
+        .map(f => path.join(videosDir, f));
+
+      console.log(`[download] found MP4 files for ${videoId}: [${allMp4Files.join(', ')}], filtered: [${downloadedFiles.map(f => path.basename(f)).join(', ')}]`);
+
+      if (downloadedFiles.length === 0) {
+        throw new Error(`Download completed but no file found for ${videoId}`);
+      }
+
+      // Prefer exact match; otherwise use the largest file (most likely the merged result)
+      const exactMatch = downloadedFiles.find(f => path.basename(f) === `${videoId}.mp4`);
+      const downloadedFile = exactMatch || downloadedFiles.reduce((a, b) =>
+        fs.statSync(a).size > fs.statSync(b).size ? a : b
+      );
+
+      console.log(`[download] selected file for validation: ${downloadedFile}`);
+
+      // Validate the downloaded file
+      if (!isValidVideoFile(downloadedFile)) {
+        fs.unlinkSync(downloadedFile);
+        throw new Error(`Downloaded file for ${videoId} is corrupted or invalid`);
+      }
+
+      // Rename to expected path if needed
+      if (downloadedFile !== outputPath) {
+        fs.renameSync(downloadedFile, outputPath);
+      }
+
+      console.log(`Video downloaded to ${outputPath}`);
+      return outputPath;
+    } finally {
+      // Always release the lock when done (success or error)
+      downloadLocks.delete(videoId);
+    }
+  })();
+
+  downloadLocks.set(videoId, downloadPromise);
+  return downloadPromise;
 }

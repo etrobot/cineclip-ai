@@ -99,7 +99,7 @@ async function testDirectPipeline(videoUrl: string) {
   console.log(`  ✅ LLM 分析完成`);
   console.log(`     生成剪辑数: ${clips.length}`);
   clips.forEach((c: any, i: number) => {
-    console.log(`     [${i + 1}] ${c.title} (${c.start}s-${c.end}s) [${c.category}]`);
+    console.log(`     [${i + 1}] ${c.title} (${c.start}s-${c.end}s)`);
   });
   console.log(`     耗时: ${fmt(d2)}`);
   results.push({ stage: 'Analyzing', duration: d2, detail: `${clips.length} clips` });

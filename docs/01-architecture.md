@@ -91,10 +91,16 @@ node dist/server/index.js
 - **Rationale**: No need for custom ML models; flexible prompt-based approach
 - **Trade-off**: Depends on external API; response format requires robust parsing
 
-### ADR-004: Single-File Clip Storage
-- **Decision**: Store clips as individual MP4 files in `clips/` directory, metadata in `clips.json`
-- **Rationale**: Simple, filesystem-based; easy to serve via Express static
-- **Trade-off**: No database; `clips.json` is the single source of truth for gallery state
+### ADR-006: Centralized Prompt Building (llmPrompt.ts)
+- **Decision**: Extract all LLM/VL prompt construction into a dedicated `llmPrompt.ts` module
+- **Rationale**: Ensures `analyzeClips` and `shotSegmentation` share the same video context format; prevents prompt drift; makes it easy to add new analysis modules
+- **Trade-off**: Slightly more indirection; requires both modules to pass `VideoContext`
+
+### ADR-004: SQLite + Drizzle ORM for Metadata Storage
+- **Decision**: Store clip metadata in local SQLite database with Drizzle ORM
+- **Rationale**: Structured data with relationships (author → post → clips → shots); supports multi-platform expansion (YouTube, X.com)
+- **Trade-off**: Requires ORM setup; schema migrations needed on schema changes
+- **Schema**: 4 tables — `author`, `original_post`, `clips`, `shots`
 
 ### ADR-005: Copy Codec for Initial Cut
 - **Decision**: Use `codec: 'copy'` (no re-encode) for initial clip extraction

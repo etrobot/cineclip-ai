@@ -31,7 +31,6 @@ testRoute.post('/subtitles', async (req, res) => {
       start: seg.start,
       end: seg.end + 10, // Add 10 seconds
       title: `Clip ${i + 1}: ${seg.text.slice(0, 30)}...`,
-      category: i === 0 ? 'Opening' : i === 1 ? 'Middle' : 'Ending',
       description: `Mock clip from ${seg.text}`,
     }));
 

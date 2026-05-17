@@ -1,14 +1,16 @@
 import { Router } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
-import { refreshClipsJson } from './gallery';
+import { eq } from 'drizzle-orm';
+import { db } from '../db';
+import { clips, shots } from '../db/schema';
 
 export const deleteRoute = Router();
 
 /**
  * POST /api/delete
  * Body: { clipUrl: string, thumbnailUrl?: string }
- * Deletes the clip video file and optionally its thumbnail
+ * Deletes the clip video file, thumbnail, and DB record
  */
 deleteRoute.post('/', async (req, res) => {
   const { clipUrl, thumbnailUrl } = req.body;
@@ -41,8 +43,14 @@ deleteRoute.post('/', async (req, res) => {
       }
     }
 
-    // Update clips.json after deletion
-    setImmediate(() => refreshClipsJson());
+    // Delete associated DB records
+    const clipRecord = await db.query.clips.findFirst({
+      where: (c, { eq }) => eq(c.clipUrl, clipUrl),
+    });
+    if (clipRecord) {
+      await db.delete(shots).where(eq(shots.clipId, clipRecord.id));
+      await db.delete(clips).where(eq(clips.id, clipRecord.id));
+    }
 
     res.json({ success: true, deleted });
   } catch (error: any) {

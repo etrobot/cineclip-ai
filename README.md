@@ -1,263 +1,123 @@
-# CineClip - YouTube 视频智能剪辑工具
+# 配置指南
 
-基于 React + Node.js 的本地应用，可以通过输入 YouTube 链接，自动提取字幕，使用 LLM 分析并剪辑成多段精彩的竖屏短视频。
+## 环境准备
 
-## 功能特性
+### 推荐：一键安装所有依赖
 
-- 🎬 **自动字幕提取**：使用 yt-dlp 提取 YouTube 视频字幕
-- 🤖 **AI 智能分析**：使用 OpenAI API 分析字幕，识别精彩片段
-- ✂️ **自动剪辑**：使用 FFmpeg 自动剪辑并转换为竖屏格式（9:16）
-- 🎨 **现代化界面**：基于 React + TailwindCSS 的精美 UI
-- 📦 **本地处理**：所有视频处理都在本地完成，保护隐私
+```bash
+chmod +x scripts/install-deps.sh
+./scripts/install-deps.sh
+```
 
-## 技术栈
+该脚本会自动安装 Node.js 依赖（pnpm）和通过 uv 安装 yt-dlp 到 `.venv/` 目录。
 
-### 前端
-- React 19
-- TypeScript
-- TailwindCSS 4
-- Motion (Framer Motion)
-- Vite
+### 手动安装
 
-### 后端
-- Node.js
-- Express
-- TypeScript
-- yt-dlp (字幕提取)
-- FFmpeg (视频处理)
-- OpenAI API (LLM 分析)
-
-## 前置要求
-
-1. **Node.js** >= 18
-2. **uv** - Python 虚拟环境管理工具 (用于安装 yt-dlp)
+1. **Node.js 依赖**
    ```bash
-   # macOS
-   brew install uv
-
-   # Linux
-   curl -LsSf https://astral.sh/uv/install.sh | sh
+   pnpm install
    ```
-3. **FFmpeg** - 视频处理工具
+
+2. **yt-dlp（通过 uv）**
+   ```bash
+   # 确保已安装 uv
+   # macOS: brew install uv
+   # Linux: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   uv venv .venv --no-project
+   uv pip install --python .venv yt-dlp
+   ```
+
+3. **FFmpeg**
    ```bash
    # macOS
    brew install ffmpeg
 
    # Linux
    sudo apt install ffmpeg
-
-   # Windows
-   # 从 https://ffmpeg.org/download.html 下载
    ```
 
-4. **OpenAI API Key** - 用于 LLM 分析
-   - 从 https://platform.openai.com/api-keys 获取
-   - 或使用兼容的第三方服务
+## API 配置
 
-## 安装步骤
+### 选项 1: OpenAI 官方 API
 
-1. **克隆项目**
-   ```bash
-   git clone <your-repo-url>
-   cd <project-folder>
-   ```
+1. 访问 https://platform.openai.com/api-keys
+2. 创建新的 API 密钥
+3. 在 `.env` 中配置：
 
-2. **一键安装所有依赖（推荐）**
-   ```bash
-   chmod +x scripts/install-deps.sh
-   ./scripts/install-deps.sh
-   ```
-   该脚本会自动：
-   - 安装 pnpm 依赖（Node.js）
-   - 安装 uv 并创建虚拟环境
-   - 通过 uv 安装 yt-dlp
-   - 自动配置 `YT_DLP_BIN` 环境变量
-
-3. **或手动安装**
-   ```bash
-   # Node.js 依赖
-   pnpm install
-
-   # Python 依赖（yt-dlp）
-   uv venv .venv --no-project
-   uv pip install --python .venv yt-dlp
-   ```
-
-4. **配置环境变量**
-   ```bash
-   cp .env.example .env
-   ```
-
-   编辑 `.env` 文件，填入你的配置：
-   ```env
-   # OpenAI API 配置
-   OPENAI_BASE_URL="https://api.openai.com/v1"
-   OPENAI_API_KEY="sk-your-api-key-here"
-   OPENAI_MODEL="gpt-4o-mini"
-
-   # 服务器端口
-   PORT=3001
-
-   # 前端 API 地址
-   VITE_API_URL=http://localhost:3001
-
-   # yt-dlp 二进制路径（如果使用 uv 安装则自动配置）
-   YT_DLP_BIN=./.venv/bin/yt-dlp
-   ```
-
-## 运行项目
-
-### 开发模式
-
-1. **启动后端服务**
-   ```bash
-   npm run server:dev
-   ```
-   服务将运行在 http://localhost:3001
-
-2. **启动前端开发服务器**（新终端）
-   ```bash
-   npm run dev
-   ```
-   前端将运行在 http://localhost:3000
-
-### 生产模式
-
-1. **构建前端**
-   ```bash
-   npm run build
-   ```
-
-2. **构建后端**
-   ```bash
-   npm run server:build
-   ```
-
-3. **启动服务**
-   ```bash
-   npm run server:start
-   ```
-
-## 使用方法
-
-1. 打开浏览器访问 http://localhost:3000
-2. 在首页输入 YouTube 视频链接
-3. 点击"Analyze"按钮
-4. 等待系统：
-   - 提取字幕
-   - AI 分析精彩片段
-   - 下载视频
-   - 处理剪辑
-5. 查看生成的剪辑片段，按类别分组展示
-
-## API 接口
-
-### POST /api/analyze
-分析 YouTube 视频并返回剪辑建议
-
-**请求体：**
-```json
-{
-  "url": "https://youtube.com/watch?v=VIDEO_ID"
-}
+```env
+OPENAI_BASE_URL="https://api.openai.com/v1"
+OPENAI_API_KEY="sk-your-actual-api-key-here"
+OPENAI_MODEL="gpt-4o-mini"
 ```
 
-**响应：**
-```json
-{
-  "videoId": "VIDEO_ID",
-  "title": "视频标题",
-  "duration": 1234,
-  "thumbnail": "缩略图URL",
-  "clips": [
-    {
-      "start": 123.5,
-      "end": 178.2,
-      "title": "片段标题",
-      "category": "High Intensity Moments",
-      "description": "片段描述"
-    }
-  ]
-}
+### 选项 2: OpenRouter (支持多种模型)
+
+1. 访问 https://openrouter.ai/keys
+2. 创建 API 密钥
+3. 在 `.env` 中配置：
+
+```env
+OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+OPENAI_API_KEY="sk-or-v1-your-api-key-here"
+OPENAI_MODEL="openai/gpt-4o-mini"
+# 或使用免费模型
+# OPENAI_MODEL="meta-llama/llama-3.2-3b-instruct:free"
 ```
 
-### POST /api/download
-下载 YouTube 视频
+### 选项 3: 其他兼容 OpenAI API 的服务
 
-**请求体：**
-```json
-{
-  "videoId": "VIDEO_ID"
-}
+任何兼容 OpenAI API 格式的服务都可以使用，只需配置正确的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`。
+
+## 测试 API 配置
+
+运行测试脚本验证配置：
+
+```bash
+./test-openai.sh
 ```
 
-### POST /api/render
-渲染视频片段为竖屏格式
-
-**请求体：**
-```json
-{
-  "videoId": "VIDEO_ID",
-  "start": 123.5,
-  "end": 178.2,
-  "outputName": "clip_name.mp4"
-}
-```
-
-## 项目结构
-
-```
-.
-├── src/                    # 前端源码
-│   ├── components/         # React 组件
-│   ├── api/               # API 客户端
-│   ├── App.tsx            # 主应用组件
-│   └── main.tsx           # 入口文件
-├── server/                # 后端源码
-│   ├── routes/            # API 路由
-│   ├── services/          # 业务逻辑
-│   │   ├── youtube.ts     # YouTube 相关服务
-│   │   ├── llm.ts         # LLM 分析服务
-│   │   └── render.ts      # 视频渲染服务
-│   ├── utils/             # 工具函数
-│   └── index.ts           # 服务器入口
-├── reference/             # 参考实现
-├── videos/                # 下载的视频（自动创建）
-├── clips/                 # 生成的剪辑（自动创建）
-└── temp/                  # 临时文件（自动创建）
-```
+如果看到成功响应（HTTP 200），说明配置正确。
 
 ## 常见问题
 
-### 1. yt-dlp 找不到
-如果使用一键安装脚本，yt-dlp 会自动安装到 `.venv/bin/yt-dlp`。
+### 401 Unauthorized
+- 检查 API 密钥是否正确
+- 确认 API 密钥没有过期
+- 验证 `OPENAI_BASE_URL` 与你的 API 提供商匹配
 
-手动安装时确保 yt-dlp 在系统 PATH 中，或在 `.env` 中指定路径：
+### 模型不存在
+- 确认模型名称正确
+- 对于 OpenRouter，使用格式：`provider/model-name`
+- 对于 OpenAI，使用：`gpt-4o-mini`, `gpt-4o`, `gpt-3.5-turbo` 等
+
+### 代理设置
+如果需要使用代理访问 API：
+
 ```env
-YT_DLP_BIN=./.venv/bin/yt-dlp
+HTTPS_PROXY=http://127.0.0.1:7890
 ```
 
-### 2. 无法下载某些视频
-某些视频可能需要登录或有地区限制，可以配置浏览器 cookies：
+## 当前配置检查
+
+你的 `.env` 文件显示：
+- Base URL: `https://api.openai.com/v1`
+- Model: `minimax/minimax-m2.5:free`
+
+这个配置不匹配！`minimax/minimax-m2.5:free` 看起来像是 OpenRouter 的模型格式，但 Base URL 指向 OpenAI。
+
+**建议修改为以下之一：**
+
+### 使用 OpenAI
 ```env
-YT_DLP_COOKIES_BROWSER=chrome
+OPENAI_BASE_URL="https://api.openai.com/v1"
+OPENAI_API_KEY="sk-your-openai-key"
+OPENAI_MODEL="gpt-4o-mini"
 ```
 
-### 3. 需要使用代理
-在 `.env` 中配置代理：
+### 使用 OpenRouter
 ```env
-HTTPS_PROXY=http://proxy.example.com:8080
+OPENAI_BASE_URL="https://openrouter.ai/api/v1"
+OPENAI_API_KEY="sk-or-v1-your-openrouter-key"
+OPENAI_MODEL="openai/gpt-4o-mini"
 ```
-
-### 4. OpenAI API 调用失败
-- 检查 API Key 是否正确
-- 检查网络连接
-- 如果使用第三方服务，确保 `OPENAI_BASE_URL` 配置正确
-
-## 许可证
-
-MIT
-
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！

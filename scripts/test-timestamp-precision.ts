@@ -38,7 +38,6 @@ async function main() {
     const duration = c.end - c.start;
     console.log(`\n  [${i + 1}] ${c.title}`);
     console.log(`      时间: ${c.start}s → ${c.end}s (时长 ${duration.toFixed(1)}s)`);
-    console.log(`      分类: ${c.category}`);
 
     // 找到该时间段内的字幕
     const relatedSubs = data.subtitles.filter(s =>

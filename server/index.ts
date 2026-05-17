@@ -14,8 +14,12 @@ import { galleryRoute } from './routes/gallery';
 import { shotsRoute } from './routes/shots';
 import { clipsRoute } from './routes/clips';
 import { wsManager } from './services/wsManager';
+import { runMigrations } from './db';
 
 dotenv.config({ override: true });
+
+// Run database migrations on startup
+runMigrations();
 
 const app = express();
 const server = createServer(app);

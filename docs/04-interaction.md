@@ -38,7 +38,7 @@
 
 ### ClipRow / ClipCard (`src/components/ClipRow.tsx`)
 - **Purpose**: Individual clip display with action buttons
-- **Key elements**: Thumbnail preview, title, category badge, action buttons
+- **Key elements**: Thumbnail preview, title, action buttons
 - **Actions**:
   - Play: open clip URL in new tab
   - Download: trigger browser download
@@ -67,7 +67,7 @@
 
 ### Path 2: Gallery View
 1. User clicks "Gallery" button (top-right of Hero)
-2. App reads clips.json and shows all previously rendered clips
+2. App queries `/api/gallery` (reads SQLite DB) and shows all previously rendered clips
 3. Grouped by source video with thumbnails
 4. Same action buttons available (play, download, grid, delete)
 
@@ -78,7 +78,18 @@
 4. Also loads server-side clips from `/api/gallery`
 5. Merges both sources to show current state
 
-### Path 4: Delete Clip
+### Path 4: Shot Segmentation
+1. User clicks "Segment Shots" on a rendered clip card
+2. App calls `POST /api/shots` with:
+   - `clipUrl`, `clipId`
+   - `subtitles` (full subtitles with absolute timestamps)
+   - `videoTitle`, `videoDescription` (from analyze response)
+3. Server extracts sampling frames from the clip
+4. VL model analyzes frames + clip subtitles + full video context → shot boundaries
+5. Server cuts each shot via FFmpeg → `clips/shots/`
+6. UI displays nested shot cards under the parent clip
+
+### Path 5: Delete Clip
 1. User clicks trash icon on a clip card
 2. App calls `POST /api/delete` with clip and thumbnail URLs
 3. Server deletes files from filesystem

@@ -1,10 +1,10 @@
 import type { SubtitleSegment } from './youtube';
+import { buildClipSystemPrompt, buildClipUserPrompt } from './llmPrompt';
 
 export interface Clip {
   start: number;
   end: number;
   title: string;
-  category: string;
   description?: string;
 }
 
@@ -16,7 +16,7 @@ function llmEnv() {
   };
 }
 
-function extractAssistantText(response: any): string {
+export function extractAssistantText(response: any): string {
   const msg = response?.choices?.[0]?.message;
   const content = msg?.content;
   if (typeof content === 'string' && content.trim()) return content;
@@ -37,7 +37,7 @@ function extractAssistantText(response: any): string {
   return '';
 }
 
-function parseJsonObject(content: string): unknown {
+export function parseJsonObject(content: string): unknown {
   let s = content.trim();
   if (s.startsWith('```')) {
     s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/m, '');
@@ -54,15 +54,7 @@ function parseJsonObject(content: string): unknown {
   }
 }
 
-/** Format seconds to M:SS.s (1 decimal place) — preserves subtitle timing precision */
-function formatTime(sec: number): string {
-  const s = Math.max(0, sec);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`;
-}
-
-async function callLLM(
+export async function callLLM(
   messages: Array<{ role: string; content: string }>,
   opts?: { responseFormat?: boolean }
 ): Promise<any> {
@@ -71,7 +63,7 @@ async function callLLM(
   console.log('Base URL:', cfg.baseUrl);
   console.log('Model:', cfg.model);
   console.log('API Key:', cfg.apiKey.substring(0, 15) + '...');
-  
+
   const useResponseFormat = false; // 禁用 response_format，某些模型不支持
   const response = await fetch(`${cfg.baseUrl}/chat/completions`, {
     method: 'POST',
@@ -108,8 +100,11 @@ function detectSubtitleLanguage(subtitles: SubtitleSegment[]): 'zh' | 'en' {
   return zhCount > enCount ? 'zh' : 'en';
 }
 
-
-export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: string): Promise<Clip[]> {
+export async function analyzeClips(
+  subtitles: SubtitleSegment[],
+  videoTitle: string,
+  videoDescription: string
+): Promise<Clip[]> {
   if (!subtitles || subtitles.length === 0) {
     return [];
   }
@@ -120,47 +115,8 @@ export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: str
 
   const lang = detectSubtitleLanguage(subtitles);
 
-  // Include 1-based index so LLM can reference exact subtitle lines
-  const subtitleLines = subtitles.map((s, i) =>
-    `#${i + 1} [${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
-  );
-  const maxLines = 300;
-  const trimmedLines = subtitleLines.length > maxLines
-    ? subtitleLines.slice(0, maxLines)
-    : subtitleLines;
-  const subtitlesText = trimmedLines.join('\n');
-
-
-
-  const systemPrompt = `你是视频剪辑师。根据完整视频字幕，提取章节片段。
-
-【输入格式】
-每行字幕格式：#序号 [M:SS.s-M:SS.s] 字幕文本
-时间精确到0.1秒，例如 0:20.8 表示20.8秒
-
-【输出要求】
-只输出 JSON，结构如下：
-{"clips":[{"title":"...","start_idx":1,"end_idx":15,"category":"分类"},...]}
-
-【切片规则】
-1. 每个片段必须是一个完整、独立的主题/观点，有明确的信息量
-2. 标题要求：
-   - 禁止空洞词汇："精彩片段"、"视频节选"、"主播谈XX"、"讨论"、"聊聊"
-   - 禁止以"片段"、"节选"、"剪辑"结尾
-   - 标题应该概括该片段的核心观点或事件，而非照搬字幕开头几个字
-3. start_idx 和 end_idx 必须是输入字幕的序号（#后面的数字），不是秒数！
-   - start_idx 是片段第一条字幕的序号
-   - end_idx 是片段最后一条字幕的序号
-   - 例如：片段从 #5 到 #18，则 start_idx=5, end_idx=18
-4. 片段之间可以有小重叠（1-3条字幕），但不要大幅重叠
-`;
-
-  const userPrompt = `整支视频标题：${videoTitle}
-
-完整字幕（共 ${subtitles.length} 条）：
-${subtitlesText}
-
-请按规则切成若干片段，输出JSON。`;
+  const systemPrompt = buildClipSystemPrompt();
+  const userPrompt = buildClipUserPrompt({ videoTitle, videoDescription, subtitles });
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -213,6 +169,62 @@ function snapToSubtitle(t: number, subtitles: SubtitleSegment[], threshold: numb
   return bestDist <= threshold ? bestTime : t;
 }
 
+/**
+ * Detect continuous music subtitle blocks and return them as clips.
+ * A "music" subtitle is one whose text is exactly "music" (case-insensitive).
+ * Contiguous music segments are merged into a single clip.
+ */
+/**
+ * Check if a subtitle text represents a music/sound marker (e.g. "[music]", ">>[Music]").
+ */
+function isMusicMarker(text: string): boolean {
+  return /\bmusic\b/i.test(text);
+}
+
+function detectMusicClips(subtitles: SubtitleSegment[]): Clip[] {
+  const musicClips: Clip[] = [];
+  let currentStart: number | null = null;
+  let currentEnd: number | null = null;
+
+  for (const seg of subtitles) {
+    const isMusic = isMusicMarker(seg.text ?? '');
+
+    if (isMusic) {
+      if (currentStart === null) {
+        currentStart = seg.start;
+        currentEnd = seg.end;
+      } else {
+        // Extend current music block
+        currentEnd = seg.end;
+      }
+    } else {
+      // End of a music block
+      if (currentStart !== null && currentEnd !== null) {
+        musicClips.push({
+          title: 'Music',
+          start: Math.round(currentStart * 10) / 10,
+          end: Math.round(currentEnd * 10) / 10,
+          description: '',
+        });
+        currentStart = null;
+        currentEnd = null;
+      }
+    }
+  }
+
+  // Handle trailing music block
+  if (currentStart !== null && currentEnd !== null) {
+    musicClips.push({
+      title: 'Music',
+      start: Math.round(currentStart * 10) / 10,
+      end: Math.round(currentEnd * 10) / 10,
+      description: '',
+    });
+  }
+
+  return musicClips;
+}
+
 function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
   if (!parsed || typeof parsed !== 'object') {
     throw new Error('LLM response is not a valid object');
@@ -223,7 +235,7 @@ function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
     throw new Error('LLM response missing clips array');
   }
 
-  const results: Clip[] = [];
+  const results: Clip[] = detectMusicClips(subtitles);
   const videoStart = subtitles[0]?.start ?? 0;
   const videoEnd = subtitles[subtitles.length - 1]?.end ?? 0;
 
@@ -233,7 +245,6 @@ function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
     }
 
     const title = typeof item.title === 'string' ? item.title.trim() : '';
-    const category = typeof item.category === 'string' ? item.category.trim() : 'Highlights';
 
     // ── Resolve start/end from subtitle index (preferred) or seconds (fallback) ──
     let start: number;
@@ -277,7 +288,6 @@ function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
     // Keep precise timestamps (no floor/ceil) — FFmpeg handles fractional seconds natively
     results.push({
       title,
-      category,
       start: Math.round(start * 10) / 10,  // round to 0.1s precision
       end: Math.round(end * 10) / 10,
       description: item.description || '',
@@ -304,7 +314,6 @@ function deduplicateClips(clips: Clip[]): Clip[] {
       if (overlap > minDuration * 0.8) {
         if ((clip.end - clip.start) > (existing.end - existing.start)) {
           existing.title = clip.title;
-          existing.category = clip.category;
           existing.start = clip.start;
           existing.end = clip.end;
         }

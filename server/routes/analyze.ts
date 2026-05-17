@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
+import { eq } from 'drizzle-orm';
 import { extractVideoId } from '../utils/youtube';
 import { getVideoWithSubtitles, downloadVideo } from '../services/youtube';
 import { analyzeClips } from '../services/llm';
 import { progressEmitter } from '../services/progressEmitter';
+import { db } from '../db';
+import { author, originalPost } from '../db/schema';
 
 export const analyzeVideoRoute = Router();
 
@@ -46,7 +49,7 @@ analyzeVideoRoute.post('/', async (req, res) => {
 
     // ── Stage 2: Analyzing (30% → 70%) ─────────────────────────────
     progressEmitter.emitProgress(jid, 'analyzing', 35, 'AI analyzing content...');
-    const clips = await analyzeClips(videoData.subtitles, videoData.title);
+    const clips = await analyzeClips(videoData.subtitles, videoData.title, videoData.description);
 
     progressEmitter.emitProgress(jid, 'analyzing', 70, 'Analysis complete');
 
@@ -65,12 +68,44 @@ analyzeVideoRoute.post('/', async (req, res) => {
       });
     }
 
+    // Save video metadata to database
+    const postUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    let existingPost = await db.query.originalPost.findFirst({
+      where: (post, { eq }) => eq(post.postUrl, postUrl),
+    });
+
+    if (!existingPost) {
+      // Try to find existing author by platformId (videoId as fallback)
+      let existingAuthor = await db.query.author.findFirst({
+        where: (a, { eq }) => eq(a.platformId, videoId),
+      });
+
+      if (!existingAuthor) {
+        [existingAuthor] = await db.insert(author).values({
+          platform: 'youtube',
+          platformId: videoId,
+          name: 'Unknown',
+        }).returning();
+      }
+
+      [existingPost] = await db.insert(originalPost).values({
+        authorId: existingAuthor.id,
+        platform: 'youtube',
+        postUrl,
+        title: videoData.title,
+        description: videoData.description,
+        subtitlesJson: JSON.stringify(videoData.subtitles),
+        coverImageUrl: videoData.thumbnail,
+      }).returning();
+    }
+
     progressEmitter.emitProgress(jid, 'splitting', 90, `${clips.length} clips ready`);
     progressEmitter.emitProgress(jid, 'complete', 100, 'Done');
 
     res.json({
       videoId: videoData.videoId,
       title: videoData.title,
+      description: videoData.description,
       duration: videoData.duration,
       thumbnail: videoData.thumbnail,
       clips,

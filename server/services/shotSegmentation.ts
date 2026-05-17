@@ -4,6 +4,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
 import { extractClip } from './ffmpeg';
+import type { SubtitleSegment } from './youtube';
+import { buildShotSystemPrompt, buildShotUserPrompt, formatTime } from './llmPrompt';
+import type { VideoContext } from './llmPrompt';
 
 const execAsync = promisify(exec);
 
@@ -187,46 +190,31 @@ function parseJsonFromText(content: string): unknown {
 }
 
 /**
- * Format seconds to M:SS.s
- */
-function formatTime(sec: number): string {
-  const s = Math.max(0, sec);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${r < 10 ? '0' : ''}${r.toFixed(1)}`;
-}
-
-/**
  * Build multi-modal prompt for shot segmentation.
  * Returns messages array for VL API.
  */
 function buildShotPrompt(
   frames: SamplingFrame[],
-  subtitles: ClipSubtitle[],
-  clipDuration: number
+  clipSubtitles: ClipSubtitle[],
+  clipDuration: number,
+  videoCtx?: VideoContext
 ): Array<any> {
-  const systemContent = `你是专业的视频分镜分析师。根据视频采样帧和字幕，将视频片段分割成shots（分镜）。
-
-【任务说明】
-每个 shot 代表一个独立的镜头或场景
-
-【输出格式】
-只输出 JSON：{"shots":[{"start":起始秒,"end":结束秒,"label":"场景描述"},...]}
-
-【规则】
-- start/end 是相对于 clip 起始的秒数（0 表示 clip 开头）
-- 时间范围必须在 [0, ${clipDuration.toFixed(1)}] 内
-- shot 之间不能重叠
-- label 是简短描述该 shot 的内容，比如xx图表动画、工厂xx操作、办公室xxx、地球xxx`;
-
-  // Build subtitle text
-  const subtitleLines = subtitles.map((s, i) =>
-    `#${i + 1} [${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
-  ).join('\n');
+  const systemContent = buildShotSystemPrompt();
 
   // Build user content with images interspersed
+  let textBlock: string;
+  if (videoCtx) {
+    textBlock = buildShotUserPrompt(videoCtx, clipDuration, clipSubtitles);
+  } else {
+    // Fallback for backward compatibility
+    const subtitleLines = clipSubtitles.map((s, i) =>
+      `#${i + 1} [${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
+    ).join('\n');
+    textBlock = `以下是视频片段的采样帧和字幕，请分析并分割 shots。片段总时长 ${clipDuration.toFixed(1)} 秒。\n\n字幕内容：\n${subtitleLines || '（无字幕）'}`;
+  }
+
   const userContent: Array<any> = [
-    { type: 'text', text: `以下是视频片段的采样帧和字幕，请分析并分割 shots。片段总时长 ${clipDuration.toFixed(1)} 秒。\n\n字幕内容：\n${subtitleLines || '（无字幕）'}\n\n采样帧（按时间顺序）：` },
+    { type: 'text', text: `${textBlock}\n\n采样帧（按时间顺序）：` },
   ];
 
   // Add up to 8 frames evenly distributed
@@ -331,7 +319,8 @@ function parseShotSegments(
  */
 export async function analyzeShots(
   clipPath: string,
-  subtitles?: ClipSubtitle[]
+  subtitles?: ClipSubtitle[],
+  videoCtx?: VideoContext
 ): Promise<ShotSegment[]> {
   console.log(`Analyzing shots for clip: ${clipPath}`);
 
@@ -357,7 +346,7 @@ export async function analyzeShots(
 
   // Build prompt and call VL model
   console.log('Calling VL model for shot segmentation...');
-  const messages = buildShotPrompt(frames, subtitles || [], clipDuration);
+  const messages = buildShotPrompt(frames, subtitles || [], clipDuration, videoCtx);
   const response = await callVLModel(messages);
   const content = extractAssistantText(response);
 
@@ -443,10 +432,11 @@ export async function cutShots(
 export async function segmentShots(
   clipPath: string,
   clipId: string,
-  subtitles?: ClipSubtitle[]
+  subtitles?: ClipSubtitle[],
+  videoCtx?: VideoContext
 ): Promise<Array<{ start: number; end: number; label: string; clipUrl: string; thumbnailUrl: string; duration: string }>> {
   // Analyze shots
-  const shots = await analyzeShots(clipPath, subtitles);
+  const shots = await analyzeShots(clipPath, subtitles, videoCtx);
 
   // Cut shots
   const cutResults = await cutShots(clipPath, shots, clipId);

@@ -1,49 +1,78 @@
-import { Router } from 'express';
-import * as path from 'path';
-import * as fs from 'fs';
-import { execSync } from 'child_process';
+import { Router } from "express";
+import { db } from "../db";
 
 export const galleryRoute = Router();
 
-const CLIPS_JSON = path.join(process.cwd(), 'clips.json');
-
-/** Run scan-clips to regenerate clips.json */
-export function refreshClipsJson(): void {
-  try {
-    execSync('npx tsx scripts/scan-clips.ts', {
-      cwd: process.cwd(),
-      timeout: 10000,
-      stdio: 'pipe',
-    });
-  } catch (err) {
-    console.warn('Failed to refresh clips.json:', err);
-  }
+function buildGalleryResponse(posts: any[]) {
+  return posts.map((post) => ({
+    videoId: post.author?.platformId || String(post.id),
+    title: post.title || "Untitled",
+    thumbnailUrl: post.coverImageUrl || "",
+    clips: post.clips.map((clip: any) => ({
+      id: String(clip.id),
+      videoId: post.author?.platformId || String(post.id),
+      fileName: clip.fileName,
+      clipUrl: clip.clipUrl,
+      thumbnailUrl: clip.thumbnailUrl,
+      start: clip.startTime || 0,
+      end: clip.endTime || 0,
+      duration: clip.duration || "0:00",
+      title: clip.title || clip.fileName,
+      size: clip.size || 0,
+      shots: clip.shots.map((shot: any) => ({
+        idx: shot.idx,
+        clipUrl: shot.clipUrl,
+        thumbnailUrl: shot.thumbnailUrl,
+        size: shot.size,
+      })),
+    })),
+  }));
 }
 
 /**
  * GET /api/gallery
- * Returns the persisted clips state from clips.json.
+ * Returns clips data from SQLite database.
  */
-galleryRoute.get('/', (_req, res) => {
+galleryRoute.get("/", async (_req, res) => {
   try {
-    if (!fs.existsSync(CLIPS_JSON)) {
-      // Auto-generate on first request
-      refreshClipsJson();
-    }
-    const raw = fs.readFileSync(CLIPS_JSON, 'utf-8');
-    res.json(JSON.parse(raw));
+    const posts = await db.query.originalPost.findMany({
+      with: {
+        author: true,
+        clips: {
+          with: {
+            shots: true,
+          },
+        },
+      },
+    });
+
+    res.json({
+      updatedAt: new Date().toISOString(),
+      groups: buildGalleryResponse(posts),
+    });
   } catch (err: any) {
-    console.error('Gallery error:', err);
+    console.error("Gallery error:", err);
     res.json({ updatedAt: null, groups: [] });
   }
 });
 
 /**
  * POST /api/gallery/refresh
- * Manually trigger a scan to update clips.json.
  */
-galleryRoute.post('/refresh', (_req, res) => {
-  refreshClipsJson();
-  const raw = fs.readFileSync(CLIPS_JSON, 'utf-8');
-  res.json(JSON.parse(raw));
+galleryRoute.post("/refresh", async (_req, res) => {
+  const posts = await db.query.originalPost.findMany({
+    with: {
+      author: true,
+      clips: {
+        with: {
+          shots: true,
+        },
+      },
+    },
+  });
+
+  res.json({
+    updatedAt: new Date().toISOString(),
+    groups: buildGalleryResponse(posts),
+  });
 });

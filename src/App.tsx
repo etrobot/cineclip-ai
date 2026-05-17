@@ -25,7 +25,6 @@ export interface ClipItem {
   id: string;
   videoId: string;
   title: string;
-  category: string;
   duration: string;
   thumbnail: string;
   start: number;
@@ -80,7 +79,6 @@ function groupClipsByVideo(
       id,
       videoId,
       title: clip.title,
-      category: clip.category || "Highlights",
       duration: formatDuration(clip.end - clip.start),
       thumbnail,
       start: clip.start,
@@ -155,7 +153,6 @@ export default function App() {
           id: c.id,
           videoId: c.videoId,
           title: c.title || c.id.replace(/_/g, " ").replace(/p/g, "."),
-          category: "Clips",
           duration: c.duration,
           thumbnail: c.thumbnailUrl || "",
           start: c.start,

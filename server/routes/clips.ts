@@ -1,135 +1,59 @@
-import { Router } from 'express';
-import * as path from 'path';
-import * as fs from 'fs';
+import { Router } from "express";
+import { db } from "../db";
 
 export const clipsRoute = Router();
 
 /**
  * GET /api/clips/list
- * Scans the clips directory and returns metadata about all existing clips.
- * Uses the videos/ directory to correctly identify videoIds from filenames.
+ * Returns all clips from SQLite database.
  */
-clipsRoute.get('/list', (_req, res) => {
+clipsRoute.get("/list", async (_req, res) => {
   try {
-    const clipsDir = path.join(process.cwd(), 'clips');
-    const thumbsDir = path.join(clipsDir, 'thumbnails');
-    const videosDir = path.join(process.cwd(), 'videos');
-
-    if (!fs.existsSync(clipsDir)) {
-      return res.json({ clips: [], groups: [] });
-    }
-
-    // Build a set of known videoIds from the videos/ directory
-    const knownVideoIds = new Set<string>();
-    if (fs.existsSync(videosDir)) {
-      for (const f of fs.readdirSync(videosDir)) {
-        if (f.endsWith('.mp4')) {
-          knownVideoIds.add(path.parse(f).name);
-        }
-      }
-    }
-
-    const files = fs.readdirSync(clipsDir).filter((f) => f.endsWith('.mp4'));
-    const thumbnails = fs.existsSync(thumbsDir)
-      ? fs.readdirSync(thumbsDir).filter((f) => f.endsWith('.jpg'))
-      : [];
-
-    // Build a thumbnail lookup map (filename without extension -> thumbnail filename)
-    const thumbMap = new Map<string, string>();
-    for (const t of thumbnails) {
-      const baseName = path.parse(t).name;
-      thumbMap.set(baseName, t);
-    }
-
-    // Build title lookup map from meta files
-    const titleMap = new Map<string, string>();
-    const metaDir = path.join(clipsDir, 'meta');
-    if (fs.existsSync(metaDir)) {
-      for (const f of fs.readdirSync(metaDir)) {
-        if (f.endsWith('.json')) {
-          const baseName = path.parse(f).name;
-          try {
-            const raw = fs.readFileSync(path.join(metaDir, f), 'utf-8');
-            const data = JSON.parse(raw);
-            if (data.title) titleMap.set(baseName, data.title);
-          } catch {}
-        }
-      }
-    }
-
-    const clips = files.map((fileName) => {
-      const baseName = path.parse(fileName).name;
-      const stat = fs.statSync(path.join(clipsDir, fileName));
-
-      // Extract videoId: try matching against known videoIds first
-      let videoId = baseName;
-      let start = 0;
-      let end = 0;
-
-      if (knownVideoIds.size > 0) {
-        // Try each known videoId as a prefix of the filename
-        for (const vid of knownVideoIds) {
-          if (baseName.startsWith(vid + '_')) {
-            videoId = vid;
-            const timePart = baseName.slice(vid.length + 1); // after "videoId_"
-            const timeParts = timePart.split('_');
-            if (timeParts.length >= 2) {
-              start = parseFloat(timeParts[0].replace(/p/g, '.'));
-              end = parseFloat(timeParts[1].replace(/p/g, '.'));
-            } else if (timeParts.length === 1) {
-              // Single number after videoId (e.g. "cnbc_final_test")
-              // Keep start/end as 0
-            }
-            break;
-          }
-        }
-      } else {
-        // Fallback: parse from filename pattern
-        const parts = baseName.split('_');
-        for (let i = 1; i < parts.length; i++) {
-          if (parts[i].includes('p')) {
-            videoId = parts.slice(0, i).join('_');
-            if (i + 1 < parts.length) {
-              start = parseFloat(parts[i].replace(/p/g, '.'));
-              end = parseFloat(parts[i + 1].replace(/p/g, '.'));
-            }
-            break;
-          }
-        }
-      }
-
-      // Check for matching thumbnail
-      const thumbnailUrl = thumbMap.has(baseName)
-        ? `/api/clips/thumbnails/${thumbMap.get(baseName)}`
-        : undefined;
-
-      // Duration
-      const durationSec = end - start;
-      const mins = Math.floor(durationSec / 60);
-      const secs = Math.floor(durationSec % 60);
-      const duration = `${mins}:${secs.toString().padStart(2, '0')}`;
-
-      return {
-        id: baseName,
-        videoId,
-        fileName,
-        clipUrl: `/api/clips/${fileName}`,
-        thumbnailUrl,
-        start,
-        end,
-        duration,
-        title: titleMap.get(baseName) || baseName,
-        size: stat.size,
-      };
+    const posts = await db.query.originalPost.findMany({
+      with: {
+        author: true,
+        clips: {
+          with: {
+            shots: true,
+          },
+        },
+      },
     });
 
-    // Group by videoId
-    const grouped = new Map<string, {
+    const flatClips: {
+      id: string;
       videoId: string;
-      clips: typeof clips;
-    }>();
+      fileName: string;
+      clipUrl: string;
+      thumbnailUrl: string | null;
+      start: number;
+      end: number;
+      duration: string;
+      title: string;
+      size: number;
+    }[] = [];
 
-    for (const clip of clips) {
+    for (const post of posts) {
+      const videoId = post.author?.platformId || String(post.id);
+      for (const clip of post.clips) {
+        flatClips.push({
+          id: String(clip.id),
+          videoId,
+          fileName: clip.fileName,
+          clipUrl: clip.clipUrl,
+          thumbnailUrl: clip.thumbnailUrl,
+          start: clip.startTime || 0,
+          end: clip.endTime || 0,
+          duration: clip.duration || "0:00",
+          title: clip.title || clip.fileName,
+          size: clip.size || 0,
+        });
+      }
+    }
+
+    // Group by videoId
+    const grouped = new Map<string, { videoId: string; clips: typeof flatClips }>();
+    for (const clip of flatClips) {
       if (!grouped.has(clip.videoId)) {
         grouped.set(clip.videoId, { videoId: clip.videoId, clips: [] });
       }
@@ -137,11 +61,11 @@ clipsRoute.get('/list', (_req, res) => {
     }
 
     res.json({
-      clips,
+      clips: flatClips,
       groups: Array.from(grouped.values()),
     });
   } catch (error: any) {
-    console.error('List clips error:', error);
-    res.status(500).json({ error: error.message || 'Failed to list clips' });
+    console.error("List clips error:", error);
+    res.status(500).json({ error: error.message || "Failed to list clips" });
   }
 });

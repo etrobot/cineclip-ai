@@ -12,6 +12,8 @@ export const shotsRoute = Router();
  *   clipUrl: string,    // e.g. "/api/clips/eV3lAY77IpU_0p6_130p1.mp4"
  *   clipId: string,     // e.g. "eV3lAY77IpU_0p6_130p1"
  *   subtitles?: Array<{start:number,end:number,text:string}>,
+ *   videoTitle?: string,
+ *   videoDescription?: string,
  *   jobId?: string
  * }
  * Returns: { shots: ShotInfo[], jobId: string }
@@ -22,7 +24,7 @@ export const shotsRoute = Router();
  *   3. Cutting shots (80-100%)
  */
 shotsRoute.post('/', async (req, res) => {
-  const { clipUrl, clipId, subtitles, jobId } = req.body;
+  const { clipUrl, clipId, subtitles, videoTitle, videoDescription, jobId } = req.body;
   const jid = jobId || `shots_${Date.now()}`;
 
   try {
@@ -43,7 +45,9 @@ shotsRoute.post('/', async (req, res) => {
     // Adjust subtitle timestamps to be relative to clip start
     // We need to know the clip's absolute start time from the filename
     let relativeSubtitles: Array<{ start: number; end: number; text: string }> | undefined;
+    let fullSubtitles: Array<{ start: number; end: number; text: string }> = [];
     if (subtitles && Array.isArray(subtitles)) {
+      fullSubtitles = subtitles;
       // Parse clip start time from filename pattern: videoId_START_END.mp4
       // e.g. "eV3lAY77IpU_0p6_130p1.mp4" -> start=0.6
       const baseName = path.parse(clipFileName).name;
@@ -70,8 +74,13 @@ shotsRoute.post('/', async (req, res) => {
 
     progressEmitter.emitProgress(jid, 'analyzing', 35, 'Analyzing with vision model...');
 
+    // Build video context if title/description are provided
+    const videoCtx = videoTitle
+      ? { videoTitle, videoDescription: videoDescription || '', subtitles: fullSubtitles }
+      : undefined;
+
     // Run segmentation
-    const shots = await segmentShots(clipPath, clipId, relativeSubtitles);
+    const shots = await segmentShots(clipPath, clipId, relativeSubtitles, videoCtx);
 
     progressEmitter.emitProgress(jid, 'complete', 100, `${shots.length} shots detected`);
 

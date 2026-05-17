@@ -4,7 +4,6 @@ export interface Clip {
   start: number;
   end: number;
   title: string;
-  category: string;
   description?: string;
 }
 
@@ -251,7 +250,7 @@ export interface GalleryResponse {
 }
 
 /**
- * Fetch gallery state from server (reads clips.json)
+ * Fetch gallery state from server (reads SQLite DB)
  */
 export async function fetchGallery(): Promise<GalleryResponse> {
   const response = await fetch(`${API_BASE_URL}/api/gallery`);
@@ -263,7 +262,7 @@ export async function fetchGallery(): Promise<GalleryResponse> {
 }
 
 /**
- * Trigger a scan to refresh clips.json
+ * Refresh gallery from DB
  */
 export async function refreshGallery(): Promise<GalleryResponse> {
   const response = await fetch(`${API_BASE_URL}/api/gallery/refresh`, { method: 'POST' });
