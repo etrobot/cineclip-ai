@@ -79,6 +79,14 @@ renderRoute.post('/', async (req, res) => {
     // Complete
     progressEmitter.emitProgress(jid, 'complete', 100, 'Render complete');
 
+    // Save clip metadata (title from LLM) for scan-clips to pick up
+    const metaDir = path.join(process.cwd(), 'clips', 'meta');
+    if (!fs.existsSync(metaDir)) {
+      fs.mkdirSync(metaDir, { recursive: true });
+    }
+    const metaPath = path.join(metaDir, `${path.basename(outputPath, '.mp4')}.json`);
+    fs.writeFileSync(metaPath, JSON.stringify({ title: title || '' }));
+
     // Update clips.json in background
     setImmediate(() => refreshClipsJson());
 

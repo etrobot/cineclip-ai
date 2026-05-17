@@ -228,6 +228,14 @@ export interface GalleryClip {
   duration: string;
   title: string;
   size: number;
+  shots?: Array<{
+    idx: number;
+    clipUrl: string;
+    thumbnailUrl: string | null;
+    size: number;
+    label?: string;
+    duration?: string;
+  }>;
 }
 
 export interface GalleryGroup {
@@ -278,6 +286,7 @@ export interface ListClipItem {
   start: number;
   end: number;
   duration: string;
+  title: string;
   size: number;
 }
 
@@ -300,6 +309,75 @@ export async function listClips(): Promise<ListClipsResponse> {
  */
 export async function healthCheck(): Promise<{ status: string }> {
   const response = await fetch(`${API_BASE_URL}/health`);
+  return response.json();
+}
+
+/**
+ * Shot segment info returned from shot segmentation API
+ */
+export interface ShotInfo {
+  start: number;
+  end: number;
+  label: string;
+  clipUrl: string;
+  thumbnailUrl: string;
+  duration: string;
+}
+
+/**
+ * Segment shots from a clip using VL model
+ */
+export async function segmentShots(
+  clipUrl: string,
+  clipId: string,
+  subtitles?: Array<{ start: number; end: number; text: string }>,
+  jobId?: string
+): Promise<{ shots: ShotInfo[]; jobId: string }> {
+  const response = await fetch(`${API_BASE_URL}/api/shots`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ clipUrl, clipId, subtitles, jobId }),
+  });
+
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const error = await response.json();
+      message = error.error || message;
+    } catch {
+      const text = await response.text();
+      message = text.slice(0, 200) || message;
+    }
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
+/**
+ * List shots for a given clip
+ */
+export async function listShots(clipId: string): Promise<{ shots: Array<{ idx: number; clipUrl: string; thumbnailUrl: string | null; size: number; label?: string; duration?: string }> }> {
+  const response = await fetch(`${API_BASE_URL}/api/shots/${clipId}`);
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to list shots');
+  }
+  return response.json();
+}
+
+/**
+ * Check server configuration (e.g. VL model availability)
+ */
+export interface ServerConfig {
+  vlModel?: string;
+}
+
+export async function getServerConfig(): Promise<ServerConfig> {
+  const response = await fetch(`${API_BASE_URL}/api/config`);
+  if (!response.ok) return {};
   return response.json();
 }
 

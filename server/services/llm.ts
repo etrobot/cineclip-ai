@@ -108,27 +108,6 @@ function detectSubtitleLanguage(subtitles: SubtitleSegment[]): 'zh' | 'en' {
   return zhCount > enCount ? 'zh' : 'en';
 }
 
-function validateTitle(title: string): { valid: boolean; reason?: string } {
-  if (!title || title.length < 4) {
-    return { valid: false, reason: '标题过短' };
-  }
-
-  const emptyPatterns = [
-    { pattern: /精彩.{0,3}片段/, desc: '包含"精彩片段"' },
-    { pattern: /视频.{0,3}(片段|节选|剪辑|内容)/, desc: '包含"视频片段/节选"' },
-    { pattern: /.{0,2}片段$/, desc: '以"片段"结尾' },
-    { pattern: /.{0,2}节选$/, desc: '以"节选"结尾' },
-    { pattern: /^\d+[:：].*$/, desc: '纯时间戳格式' },
-    { pattern: /^(And|But|So|The|Well|Now|OK|So,)\s/i, desc: '英文口语开头，非标题格式' },
-    { pattern: /^.{1,25}\s$/, desc: '英文标题被截断（末尾空格）' },
-  ];
-  for (const { pattern, desc } of emptyPatterns) {
-    if (pattern.test(title)) {
-      return { valid: false, reason: `标题不合格: ${desc}` };
-    }
-  }
-  return { valid: true };
-}
 
 export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: string): Promise<Clip[]> {
   if (!subtitles || subtitles.length === 0) {
@@ -153,7 +132,7 @@ export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: str
 
 
 
-  const systemPrompt = `你是视频剪辑师。根据完整视频字幕，把视频切成若干个有独立主题的片段。
+  const systemPrompt = `你是视频剪辑师。根据完整视频字幕，提取章节片段。
 
 【输入格式】
 每行字幕格式：#序号 [M:SS.s-M:SS.s] 字幕文本
@@ -174,8 +153,7 @@ export async function analyzeClips(subtitles: SubtitleSegment[], videoTitle: str
    - end_idx 是片段最后一条字幕的序号
    - 例如：片段从 #5 到 #18，则 start_idx=5, end_idx=18
 4. 片段之间可以有小重叠（1-3条字幕），但不要大幅重叠
-5. 如果视频内容连贯无明显断点，可以只切 1-2 个精华片段
-6. 不要切太多碎片，宁缺毋滥`;
+`;
 
   const userPrompt = `整支视频标题：${videoTitle}
 
@@ -293,12 +271,6 @@ function normalizeClips(parsed: any, subtitles: SubtitleSegment[]): Clip[] {
     }
     if (start < videoStart - 1 || end > videoEnd + 5) {
       console.warn(`Skipping out-of-range clip: ${start}-${end} (video: ${videoStart}-${videoEnd})`);
-      continue;
-    }
-
-    const validation = validateTitle(title);
-    if (!validation.valid) {
-      console.warn(`Skipping invalid title: ${validation.reason}: "${title}"`);
       continue;
     }
 

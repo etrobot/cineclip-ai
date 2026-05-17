@@ -41,6 +41,22 @@ clipsRoute.get('/list', (_req, res) => {
       thumbMap.set(baseName, t);
     }
 
+    // Build title lookup map from meta files
+    const titleMap = new Map<string, string>();
+    const metaDir = path.join(clipsDir, 'meta');
+    if (fs.existsSync(metaDir)) {
+      for (const f of fs.readdirSync(metaDir)) {
+        if (f.endsWith('.json')) {
+          const baseName = path.parse(f).name;
+          try {
+            const raw = fs.readFileSync(path.join(metaDir, f), 'utf-8');
+            const data = JSON.parse(raw);
+            if (data.title) titleMap.set(baseName, data.title);
+          } catch {}
+        }
+      }
+    }
+
     const clips = files.map((fileName) => {
       const baseName = path.parse(fileName).name;
       const stat = fs.statSync(path.join(clipsDir, fileName));
@@ -102,6 +118,7 @@ clipsRoute.get('/list', (_req, res) => {
         start,
         end,
         duration,
+        title: titleMap.get(baseName) || baseName,
         size: stat.size,
       };
     });

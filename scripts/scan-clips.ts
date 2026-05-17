@@ -6,6 +6,14 @@
 import * as path from 'path';
 import * as fs from 'fs';
 
+interface ShotEntry {
+  idx: number;
+  clipUrl: string;
+  thumbnailUrl: string | null;
+  size: number;
+  label?: string;
+}
+
 interface ClipEntry {
   id: string;
   videoId: string;
@@ -17,6 +25,7 @@ interface ClipEntry {
   duration: string;
   title: string;
   size: number;
+  shots?: ShotEntry[];
 }
 
 interface ClipGroup {
@@ -52,6 +61,61 @@ if (fs.existsSync(thumbsDir)) {
     if (t.endsWith('.jpg') || t.endsWith('.png')) {
       thumbMap.set(path.parse(t).name, t);
     }
+  }
+}
+
+// Build shot map (clipId -> shots)
+// Build title map from meta files
+const titleMap = new Map<string, string>();
+const metaDir = path.join(clipsDir, 'meta');
+if (fs.existsSync(metaDir)) {
+  for (const f of fs.readdirSync(metaDir)) {
+    if (f.endsWith('.json')) {
+      const baseName = path.parse(f).name;
+      try {
+        const raw = fs.readFileSync(path.join(metaDir, f), 'utf-8');
+        const data = JSON.parse(raw);
+        if (data.title) titleMap.set(baseName, data.title);
+      } catch {}
+    }
+  }
+}
+
+const shotMap = new Map<string, ShotEntry[]>();
+const shotsDir = path.join(clipsDir, 'shots');
+const shotThumbsDir = path.join(shotsDir, 'thumbnails');
+
+if (fs.existsSync(shotsDir)) {
+  for (const f of fs.readdirSync(shotsDir)) {
+    if (!f.endsWith('.mp4')) continue;
+    const shotBaseName = path.parse(f).name;
+    // Parse clipId and shot index: {clipId}_shot_{idx}
+    const m = shotBaseName.match(/^(.+)_shot_(\d+)$/);
+    if (!m) continue;
+    const clipId = m[1];
+    const idx = parseInt(m[2], 10);
+
+    const thumbName = `${shotBaseName}.jpg`;
+    const thumbPath = path.join(shotThumbsDir, thumbName);
+    const filePath = path.join(shotsDir, f);
+    const stat = fs.statSync(filePath);
+
+    const entry: ShotEntry = {
+      idx,
+      clipUrl: `/api/clips/shots/${f}`,
+      thumbnailUrl: fs.existsSync(thumbPath) ? `/api/clips/shots/thumbnails/${thumbName}` : null,
+      size: stat.size,
+    };
+
+    if (!shotMap.has(clipId)) {
+      shotMap.set(clipId, []);
+    }
+    shotMap.get(clipId)!.push(entry);
+  }
+
+  // Sort shots by idx for each clip
+  for (const [, shots] of shotMap) {
+    shots.sort((a, b) => a.idx - b.idx);
   }
 }
 
@@ -101,8 +165,9 @@ const clips: ClipEntry[] = clipFiles.map(fileName => {
     start,
     end,
     duration,
-    title: baseName,
+    title: titleMap.get(baseName) || baseName,
     size: stat.size,
+    shots: shotMap.get(baseName),
   };
 });
 
