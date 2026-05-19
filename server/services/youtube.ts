@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { runYtDlp } from '../utils/ytDlp';
+import { runYtDlp } from '../utils/ytDlp.js';
 
 export interface VideoMetadata {
   videoId: string;
@@ -240,20 +240,18 @@ function isValidVideoFile(filePath: string): boolean {
   try {
     const stats = fs.statSync(filePath);
     if (stats.size < 1024 * 1024) return false; // Less than 1MB is suspicious
-    
-    // Check first 64KB for null byte ratio
+
+    // Check for MP4 signature in first 64KB: ftyp box or moov/mdat atoms
     const fd = fs.openSync(filePath, 'r');
     const buf = Buffer.alloc(65536);
     const bytesRead = fs.readSync(fd, buf, 0, 65536, 0);
     fs.closeSync(fd);
-    
-    const nullCount = buf.slice(0, bytesRead).filter(b => b === 0).length;
-    const nullRatio = nullCount / bytesRead;
-    if (nullRatio > 0.1) return false; // More than 10% null bytes is corrupted
-    
-    // Check for mdat or moov signature (MP4 container)
-    const header = buf.slice(0, 65536);
-    return header.includes(Buffer.from('mdat')) || header.includes(Buffer.from('moov'));
+
+    const header = buf.slice(0, bytesRead);
+    // MP4 files start with 'ftyp' box, or contain 'moov'/'mdat' atoms
+    return header.includes(Buffer.from('ftyp')) ||
+           header.includes(Buffer.from('mdat')) ||
+           header.includes(Buffer.from('moov'));
   } catch {
     return false;
   }
@@ -324,27 +322,30 @@ export async function downloadVideo(videoId: string): Promise<string> {
         videoUrl,
       ]);
 
-      // Find the downloaded file (yt-dlp may add suffixes)
-      const allMp4Files = fs.readdirSync(videosDir)
-        .filter(f => f.startsWith(videoId) && f.endsWith('.mp4'));
+      // Find the downloaded file (yt-dlp may add suffixes or .part extension)
+      const allFiles = fs.readdirSync(videosDir)
+        .filter(f => f.startsWith(videoId) && (f.endsWith('.mp4') || f.endsWith('.mp4.part')));
 
       // Exclude yt-dlp temporary fragment files (e.g. .f137.mp4, .f140.mp4)
       const tempFragmentRegex = /\.f\d+\.mp4$/;
-      const downloadedFiles = allMp4Files
+      const downloadedFiles = allFiles
         .filter(f => !tempFragmentRegex.test(f))
         .map(f => path.join(videosDir, f));
 
-      console.log(`[download] found MP4 files for ${videoId}: [${allMp4Files.join(', ')}], filtered: [${downloadedFiles.map(f => path.basename(f)).join(', ')}]`);
+      console.log(`[download] found MP4 files for ${videoId}: [${allFiles.join(', ')}], filtered: [${downloadedFiles.map(f => path.basename(f)).join(', ')}]`);
 
       if (downloadedFiles.length === 0) {
         throw new Error(`Download completed but no file found for ${videoId}`);
       }
 
-      // Prefer exact match; otherwise use the largest file (most likely the merged result)
+      // Prefer exact match (non-.part), then largest file
       const exactMatch = downloadedFiles.find(f => path.basename(f) === `${videoId}.mp4`);
-      const downloadedFile = exactMatch || downloadedFiles.reduce((a, b) =>
-        fs.statSync(a).size > fs.statSync(b).size ? a : b
-      );
+      const downloadedFile = exactMatch || downloadedFiles.sort((a, b) => {
+        const aIsPart = a.endsWith('.part');
+        const bIsPart = b.endsWith('.part');
+        if (aIsPart !== bIsPart) return aIsPart ? 1 : -1;
+        return fs.statSync(b).size - fs.statSync(a).size;
+      })[0];
 
       console.log(`[download] selected file for validation: ${downloadedFile}`);
 
@@ -354,7 +355,7 @@ export async function downloadVideo(videoId: string): Promise<string> {
         throw new Error(`Downloaded file for ${videoId} is corrupted or invalid`);
       }
 
-      // Rename to expected path if needed
+      // Rename to expected path if needed (strip .part suffix)
       if (downloadedFile !== outputPath) {
         fs.renameSync(downloadedFile, outputPath);
       }

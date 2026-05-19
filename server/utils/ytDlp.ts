@@ -62,7 +62,7 @@ export async function runYtDlp(args: string[]): Promise<YtDlpRunResult> {
   }
 
   return await new Promise((resolve, reject) => {
-    const TIMEOUT_MS = 120 * 1000; // 2 minutes
+    const TIMEOUT_MS = 600 * 1000; // 10 minutes
     const child = spawn(ytDlpBin, [...extraArgs, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -84,7 +84,7 @@ export async function runYtDlp(args: string[]): Promise<YtDlpRunResult> {
 
     child.on('error', (error: Error) => {
       clearTimeout(timer);
-      reject(error);
+      reject(wrapError(error));
     });
 
     child.on('close', (code: number | null) => {
@@ -94,7 +94,14 @@ export async function runYtDlp(args: string[]): Promise<YtDlpRunResult> {
         return;
       }
 
-      reject(new Error(`yt-dlp exited with code ${code}. stderr=${stderr || '(empty)'}`));
+      reject(wrapError(new Error(`yt-dlp exited with code ${code}. stderr=${stderr || '(empty)'}`)));
     });
   });
+}
+
+function wrapError(error: Error): Error {
+  if (error.message.includes('nodename nor servname provided')) {
+    return new Error(`${error.message}. This usually means the runtime cannot resolve twitter.com/x.com/youtube.com. Check your network or set HTTPS_PROXY/ALL_PROXY before rerunning.`);
+  }
+  return error;
 }

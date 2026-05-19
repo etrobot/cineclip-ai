@@ -2,14 +2,33 @@ import { Router } from 'express';
 import { renderClip } from '../services/render';
 import { generateThumbnailFromGrid } from '../services/grid';
 import { downloadVideo } from '../services/youtube';
+import { downloadXVideo } from '../services/x';
 import { progressEmitter } from '../services/progressEmitter';
 import { db } from '../db';
 import { originalPost, clips as clipsTable } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import * as path from 'path';
 import * as fs from 'fs';
 
 export const renderRoute = Router();
+
+function isValidVideoFile(filePath: string): boolean {
+  try {
+    const stats = fs.statSync(filePath);
+    if (stats.size < 1024 * 1024) return false;
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(65536);
+    const bytesRead = fs.readSync(fd, buf, 0, 65536, 0);
+    fs.closeSync(fd);
+    const nullCount = buf.slice(0, bytesRead).filter(b => b === 0).length;
+    const nullRatio = nullCount / bytesRead;
+    if (nullRatio > 0.1) return false;
+    const header = buf.slice(0, bytesRead);
+    return header.includes(Buffer.from('mdat')) || header.includes(Buffer.from('moov'));
+  } catch {
+    return false;
+  }
+}
 
 /**
  * POST /api/render
@@ -20,12 +39,13 @@ export const renderRoute = Router();
  *   outputName?: string,
  *   title?: string,
  *   subtitles?: Array<{start:number,end:number,text:string}>,
- *   jobId?: string
+ *   jobId?: string,
+ *   sourceUrl?: string,   // For non-YouTube videos (e.g. X posts)
  * }
  * Returns: { outputPath: string, clipUrl: string, thumbnailUrl: string, jobId: string }
  */
 renderRoute.post('/', async (req, res) => {
-  const { videoId, start, end, outputName, title, subtitles, jobId } = req.body;
+  const { videoId, start, end, outputName, title, subtitles, jobId, sourceUrl } = req.body;
   const jid = jobId || `render_${Date.now()}`;
 
   try {
@@ -45,43 +65,35 @@ renderRoute.post('/', async (req, res) => {
       fs.mkdirSync(thumbsDir, { recursive: true });
     }
 
-    // Step 0: Download video if not already cached
+    // Step 0: Ensure video is downloaded
     const videoPath = path.join(videosDir, `${videoId}.mp4`);
     let needDownload = true;
-    if (fs.existsSync(videoPath)) {
-      // Validate file is a proper video (not corrupt/incomplete)
-      const stats = fs.statSync(videoPath);
-      if (stats.size > 1024 * 1024) {
-        try {
-          const fd = fs.openSync(videoPath, 'r');
-          const buf = Buffer.alloc(65536);
-          const bytesRead = fs.readSync(fd, buf, 0, 65536, 0);
-          fs.closeSync(fd);
-          const nullCount = buf.slice(0, bytesRead).filter(b => b === 0).length;
-          if (nullCount / bytesRead < 0.1 && (buf.includes('mdat') || buf.includes('moov'))) {
-            needDownload = false;
-          }
-        } catch {
-          // Validation failed, re-download
-        }
-      }
+    if (fs.existsSync(videoPath) && isValidVideoFile(videoPath)) {
+      needDownload = false;
     }
-    
+
     if (needDownload) {
       progressEmitter.emitProgress(jid, 'downloading', 5, 'Downloading video...');
-      await downloadVideo(videoId);
+
+      if (sourceUrl) {
+        // Non-YouTube source (e.g. X post video)
+        await downloadXVideo(videoId, sourceUrl);
+      } else {
+        // YouTube source
+        await downloadVideo(videoId);
+      }
       progressEmitter.emitProgress(jid, 'downloading', 25, 'Video downloaded');
     } else {
       progressEmitter.emitProgress(jid, 'downloading', 25, 'Video already cached');
     }
 
-    // Step 1: Render the clip first (needed for grid-based thumbnail)
+    // Step 1: Render the clip
     progressEmitter.emitProgress(jid, 'rendering', 30, 'Extracting clip...');
     const outputPath = await renderClip(videoId, start, end, outputName, title, subtitles);
 
     progressEmitter.emitProgress(jid, 'rendering', 70, 'Clip rendered');
 
-    // Step 2: Generate thumbnail from grid (1:1 first cell)
+    // Step 2: Generate thumbnail from grid
     progressEmitter.emitProgress(jid, 'thumbnail', 75, 'Generating thumbnail from grid...');
     const safeStart = String(start).replace(/\./g, 'p');
     const safeEnd = String(end).replace(/\./g, 'p');
@@ -106,10 +118,27 @@ renderRoute.post('/', async (req, res) => {
     const clipUrl = `/api/clips/${clipFileName}`;
 
     // Save clip metadata to database
-    const postUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const post = await db.query.originalPost.findFirst({
-      where: (p, { eq }) => eq(p.postUrl, postUrl),
+    // Find post by videoId (YouTube format: https://www.youtube.com/watch?v={videoId})
+    // or by post URL if sourceUrl is an X post
+    let post = await db.query.originalPost.findFirst({
+      where: (p, { eq, or }) => or(
+        eq(p.postUrl, `https://www.youtube.com/watch?v=${videoId}`),
+        sourceUrl ? eq(p.postUrl, sourceUrl) : undefined
+      ),
     });
+
+    // Also try matching by postUrl that contains the videoId (for X posts with composite IDs)
+    if (!post) {
+      const allPosts = await db.query.originalPost.findMany({
+        where: (p, { eq }) => eq(p.platform, 'x'),
+      });
+      // Find a post whose URL contains the postId part of videoId (e.g. postId_v0 → postId)
+      const postIdPrefix = videoId.split('_')[0];
+      const matchedPost = allPosts.find(p => p.postUrl.includes(postIdPrefix));
+      if (matchedPost) {
+        post = matchedPost;
+      }
+    }
 
     if (post) {
       const durationSec = end - start;

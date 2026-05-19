@@ -5,6 +5,8 @@ export interface Clip {
   end: number;
   title: string;
   description?: string;
+  videoId?: string;      // For X posts where each clip may belong to a different video
+  sourceUrl?: string;    // Original source URL for non-YouTube videos
 }
 
 export interface SubtitleItem {
@@ -151,14 +153,15 @@ export async function renderClip(
   outputName?: string,
   title?: string,
   subtitles?: SubtitleItem[],
-  jobId?: string
+  jobId?: string,
+  sourceUrl?: string
 ): Promise<RenderResponse> {
   const response = await fetch(`${API_BASE_URL}/api/render`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ videoId, start, end, outputName, title, subtitles, jobId }),
+    body: JSON.stringify({ videoId, start, end, outputName, title, subtitles, jobId, sourceUrl }),
   });
 
   if (!response.ok) {

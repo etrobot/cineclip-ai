@@ -93,74 +93,19 @@ export default function LoadingModal({ isOpen, status, progress }: LoadingModalP
             {/* Stage Steps */}
             <div className="flex flex-col items-center gap-5 relative z-10">
 
-              {/* Stage list with checkmarks */}
-              <div className="flex flex-col items-start gap-3">
-                {STAGES.map((stage, idx) => {
-                  const isDone = isComplete || idx < currentStageIdx;
-                  const isActive = !isComplete && idx === currentStageIdx;
-
-                  return (
-                    <motion.div
-                      key={stage.key}
-                      className="flex items-center gap-3"
-                      initial={false}
-                      animate={{
-                        opacity: isDone || isActive ? 1 : 0.3,
-                      }}
-                      transition={{ duration: 0.3 }}
-                    >
-                      <div className="w-5 h-5 flex items-center justify-center">
-                        {isDone ? (
-                          <Check className="w-4 h-4 text-green-500" />
-                        ) : isActive ? (
-                          <motion.div
-                            animate={{ rotate: 360 }}
-                            transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                            className="w-2 h-2 bg-red-500 rounded-full"
-                          />
-                        ) : (
-                          <div className="w-2 h-2 bg-zinc-600 rounded-full" />
-                        )}
-                      </div>
-                      <span
-                        className={`text-sm font-medium tracking-wide ${
-                          isActive
-                            ? "text-white font-bold"
-                            : isDone
-                            ? "text-zinc-300"
-                            : "text-zinc-500"
-                        }`}
-                      >
-                        {stage.label}
-                      </span>
-                    </motion.div>
-                  );
-                })}
-                {/* Done step */}
-                <motion.div
-                  className="flex items-center gap-3"
-                  initial={false}
-                  animate={{
-                    opacity: isComplete ? 1 : 0.3,
-                  }}
+              {/* Current step detail text with animation */}
+              <AnimatePresence mode="wait">
+                <motion.p
+                  key={status}
+                  initial={{ y: 15, opacity: 0, filter: "blur(4px)" }}
+                  animate={{ y: 0, opacity: 1, filter: "blur(0px)" }}
+                  exit={{ y: -15, opacity: 0, filter: "blur(4px)" }}
                   transition={{ duration: 0.3 }}
+                  className="text-lg font-black tracking-[0.2em] text-white uppercase italic drop-shadow-[0_0_8px_rgba(255,255,255,0.5)]"
                 >
-                  <div className="w-5 h-5 flex items-center justify-center">
-                    {isComplete ? (
-                      <Check className="w-4 h-4 text-green-500" />
-                    ) : (
-                      <div className="w-2 h-2 bg-zinc-600 rounded-full" />
-                    )}
-                  </div>
-                  <span
-                    className={`text-sm font-medium tracking-wide ${
-                      isComplete ? "text-white font-bold" : "text-zinc-500"
-                    }`}
-                  >
-                    Done
-                  </span>
-                </motion.div>
-              </div>
+                  {isComplete ? "Done" : STAGES[currentStageIdx]?.label || status}
+                </motion.p>
+              </AnimatePresence>
 
               {/* Overall progress bar */}
               <div className="w-56 h-1 bg-zinc-800 rounded-full overflow-hidden relative shadow-[0_0_10px_rgba(0,0,0,0.5)]">

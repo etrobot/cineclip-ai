@@ -30,6 +30,7 @@ export interface ClipItem {
   start: number;
   end: number;
   subtitles?: SubtitleItem[];
+  sourceUrl?: string; // For non-YouTube videos (e.g. X posts)
   // render state
   status: ClipStatus;
   progress: number;
@@ -74,10 +75,12 @@ function groupClipsByVideo(
   allSubtitles?: SubtitleItem[]
 ): VideoGroup[] {
   const items: ClipItem[] = clipsData.map((clip) => {
-    const id = makeClipId(videoId, clip.start, clip.end);
+    // For X posts, each clip may have its own videoId
+    const clipVideoId = clip.videoId || videoId;
+    const id = makeClipId(clipVideoId, clip.start, clip.end);
     return {
       id,
-      videoId,
+      videoId: clipVideoId,
       title: clip.title,
       duration: formatDuration(clip.end - clip.start),
       thumbnail,
@@ -86,6 +89,7 @@ function groupClipsByVideo(
       subtitles: allSubtitles
         ? getClipSubtitles(allSubtitles, clip.start, clip.end)
         : undefined,
+      sourceUrl: clip.sourceUrl,
       status: "pending",
       progress: 0,
       stage: "",
@@ -129,6 +133,7 @@ export default function App() {
   const [view, setView] = useState<AppView>("home");
   const [status, setStatus] = useState("Initializing");
   const [progress, setProgress] = useState(0);
+  const [currentStage, setCurrentStage] = useState("subtitles");
   const [analyzedClips, setAnalyzedClips] = useState<VideoGroup[]>([]);
   const [videoData, setVideoData] = useState<{
     videoId: string;
@@ -226,7 +231,8 @@ export default function App() {
           undefined,
           item.title,
           item.subtitles,
-          jobId
+          jobId,
+          item.sourceUrl
         );
 
         // Wait for progress to complete (or timeout after 2 minutes)
@@ -268,6 +274,24 @@ export default function App() {
     [renderOneClip]
   );
 
+  const handleRetryClip = useCallback(
+    (clipId: string) => {
+      const allItems = analyzedClips.flatMap((group) => group.items);
+      const clip = allItems.find((item) => item.id === clipId);
+      if (!clip) {
+        console.warn(`[Retry] Clip not found: ${clipId}`);
+        return;
+      }
+
+      if (clip.status === 'rendering' || clip.status === 'pending') {
+        return;
+      }
+
+      renderOneClip(clip);
+    },
+    [analyzedClips, renderOneClip]
+  );
+
   const startAnalysis = useCallback(
     async (url: string) => {
       console.log("Analyzing URL:", url);
@@ -275,6 +299,7 @@ export default function App() {
       setError(null);
       setProgress(0);
       setStatus("Initializing");
+      setCurrentStage("subtitles");
 
       const jobId = generateJobId();
       abortRef.current = new AbortController();
@@ -283,6 +308,7 @@ export default function App() {
         jobId,
         (event: ProgressEvent) => {
           setProgress(event.progress);
+          setCurrentStage(event.stage);
           setStatus(getStageLabel(event.stage, event.message));
         },
         () => {
@@ -469,13 +495,14 @@ export default function App() {
                 analyzedClips.map((row) =>
                   row.items.length > 0 ? (
                     <div key={row.videoId}>
-                      <ClipRow
-                        videoTitle={row.title}
-                        videoThumbnail={row.thumbnail}
-                        clips={row.items}
-                        onDeleteClip={handleDeleteClip}
-                        subtitles={row.items[0]?.subtitles}
-                      />
+        <ClipRow
+          videoTitle={row.title}
+          videoThumbnail={row.thumbnail}
+          clips={row.items}
+          onDeleteClip={handleDeleteClip}
+          onRetryClip={handleRetryClip}
+          subtitles={row.items[0]?.subtitles}
+        />
                     </div>
                   ) : null
                 )
@@ -496,7 +523,7 @@ export default function App() {
 
       <LoadingModal
         isOpen={view === "loading"}
-        status={error || status}
+        status={error || currentStage}
         progress={progress}
       />
     </div>

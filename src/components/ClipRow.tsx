@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp } from "lucide-react";
+import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import { API_BASE_URL, segmentShots, listShots, getServerConfig, type ShotInfo, type SubtitleItem } from "../api/client";
 import type { ClipItem } from "../App";
@@ -8,6 +8,7 @@ interface ClipCardProps {
   clip: ClipItem;
   index: number;
   onDelete?: (clipId: string) => void;
+  onRetry?: (clipId: string) => void;
   subtitles?: SubtitleItem[];
 }
 
@@ -23,7 +24,7 @@ function getRenderStageLabel(stage: string, message: string): string {
   return message || RENDER_STAGE_LABELS[stage] || stage;
 }
 
-export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, subtitles }) => {
+export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRetry, subtitles }) => {
   const isRendering = clip.status === "pending" || clip.status === "rendering";
   const isError = clip.status === "error";
   const isDone = clip.status === "done";
@@ -124,8 +125,8 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, subti
           />
           <div className="absolute inset-0 bg-black/10 group-hover:bg-black/30 transition-colors" />
 
-          {isRendering ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60">
+            {isRendering ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60">
               <Loader2 className="w-6 h-6 text-red-600 animate-spin mb-1" />
               <span className="text-[10px] font-bold text-white uppercase tracking-tighter mb-1">
                 {clip.status === "pending"
@@ -144,16 +145,28 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, subti
                 {Math.round(clip.progress)}%
               </span>
             </div>
-          ) : isError ? (
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70">
-              <span className="text-[10px] font-bold text-red-500 uppercase tracking-tighter">
-                Failed
-              </span>
-              <span className="text-[9px] text-zinc-400 mt-1 px-2 text-center line-clamp-2">
-                {clip.errorMessage}
-              </span>
-            </div>
-          ) : (
+            ) : isError ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70">
+                <span className="text-[10px] font-bold text-red-500 uppercase tracking-tighter">
+                  Failed
+                </span>
+                <span className="text-[9px] text-zinc-400 mt-1 px-2 text-center line-clamp-2">
+                  {clip.errorMessage}
+                </span>
+                {onRetry && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRetry(clip.id);
+                    }}
+                    className="mt-2 inline-flex items-center gap-1 px-3 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide bg-red-600/90 hover:bg-red-500/90 text-white"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    Retry
+                  </button>
+                )}
+              </div>
+            ) : (
             <>
               {/* Duration badge */}
               <div className="absolute top-1.5 right-1.5 bg-black/60 px-1.5 py-0.5 rounded text-[9px] font-bold text-white">
@@ -313,10 +326,11 @@ interface ClipRowProps {
   videoThumbnail: string;
   clips: ClipItem[];
   onDeleteClip?: (clipId: string) => void;
+  onRetryClip?: (clipId: string) => void;
   subtitles?: SubtitleItem[];
 }
 
-export function ClipRow({ videoTitle, videoThumbnail, clips, onDeleteClip, subtitles }: ClipRowProps) {
+export function ClipRow({ videoTitle, videoThumbnail, clips, onDeleteClip, onRetryClip, subtitles }: ClipRowProps) {
   return (
     <div className="mb-8">
       <div className="flex items-center gap-3 mb-4">
@@ -331,7 +345,14 @@ export function ClipRow({ videoTitle, videoThumbnail, clips, onDeleteClip, subti
       </div>
       <div className="flex flex-col gap-2">
         {clips.map((clip, i) => (
-          <ClipCard key={clip.id} clip={clip} index={i} onDelete={onDeleteClip} subtitles={subtitles} />
+          <ClipCard
+            key={clip.id}
+            clip={clip}
+            index={i}
+            onDelete={onDeleteClip}
+            onRetry={onRetryClip}
+            subtitles={subtitles}
+          />
         ))}
       </div>
     </div>
