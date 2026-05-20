@@ -52,6 +52,10 @@ deleteRoute.post('/', async (req, res) => {
       await db.delete(clips).where(eq(clips.id, clipRecord.id));
     }
 
+    // Also clear any shot rows that were stored before a clip record existed.
+    const sourceClipId = path.parse(clipFileName).name;
+    await db.delete(shots).where(eq(shots.sourceClipId, sourceClipId));
+
     res.json({ success: true, deleted });
   } catch (error: any) {
     console.error('Delete error:', error);

@@ -27,7 +27,7 @@
 | Tool | Purpose |
 |------|---------|
 | yt-dlp | YouTube subtitle extraction & video download |
-| FFmpeg | Video cutting, format conversion, subtitle overlay |
+| FFmpeg | Video cutting, format conversion, subtitle overlay, scene detection, keyframe extraction |
 | Sharp | Thumbnail generation |
 | OpenAI API | LLM content analysis (clip suggestion) |
 
@@ -69,6 +69,7 @@ node dist/server/index.js
 | `OPENAI_BASE_URL` | Yes | `https://api.openai.com/v1` | OpenAI-compatible API endpoint |
 | `OPENAI_API_KEY` | Yes | — | API key for LLM |
 | `OPENAI_MODEL` | No | `gpt-4o-mini` | Model name for analysis |
+| `VL_MODEL` | No | `gemini-2.0-flash-vision` | Vision-language model used for shot labeling |
 | `PORT` | No | `3001` | Server port |
 | `VITE_API_URL` | No | `http://localhost:3001` | Frontend API address |
 | `YT_DLP_BIN` | No | `.venv/bin/yt-dlp` | yt-dlp binary path |
@@ -90,6 +91,11 @@ node dist/server/index.js
 - **Decision**: Use OpenAI API to analyze subtitles and suggest clips
 - **Rationale**: No need for custom ML models; flexible prompt-based approach
 - **Trade-off**: Depends on external API; response format requires robust parsing
+
+### ADR-007: Hybrid Shot Segmentation
+- **Decision**: Use FFmpeg scene detection to determine shot boundaries, then use a VL model to label each scene from a numbered grid
+- **Rationale**: Scene boundaries become more precise and deterministic, while the VL model focuses on semantic labeling instead of boundary detection
+- **Trade-off**: Slightly more FFmpeg work and one extra image-building step; shot labeling still depends on the VL API
 
 ### ADR-006: Centralized Prompt Building (llmPrompt.ts)
 - **Decision**: Extract all LLM/VL prompt construction into a dedicated `llmPrompt.ts` module

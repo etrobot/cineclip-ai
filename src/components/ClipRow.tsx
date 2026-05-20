@@ -269,7 +269,7 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
                   <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 pt-1">
                     {shots.map((shot, idx) => (
                       <div
-                        key={idx}
+                        key={shot.clipUrl || `${idx}-${shot.label}`}
                         className="group/shot relative rounded-lg overflow-hidden bg-zinc-950 cursor-pointer"
                         onClick={() => {
                           const url = shot.clipUrl.startsWith('http')

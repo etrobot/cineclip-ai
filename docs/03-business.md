@@ -22,8 +22,10 @@ User Input (YouTube URL)
   │   └─ Save clip metadata to SQLite (original_post, clips tables)
   │
   ├─ 4. Shot Segmentation (Optional) ─────────────────────────
-  │   ├─ Extract sampling frames from clip (1 FPS)
-  │   ├─ VL Model: analyze frames + clip subtitles + full video context → Shot[]
+  │   ├─ FFmpeg: detect scene boundaries in the clip
+  │   ├─ Extract one keyframe from each scene midpoint
+  │   ├─ Build numbered grid image for all scenes
+  │   ├─ VL Model: label each scene from grid + subtitles + full video context → Shot[]
   │   ├─ FFmpeg: cut each shot → clips/shots/{clipId}_shot_{idx}.mp4
   │   └─ Generate thumbnails for each shot
   │
@@ -56,12 +58,21 @@ Each job gets a unique `jobId` (`job_{timestamp}_{random}`). Progress events are
 
 ### Shot Segmentation
 - Operates on an already-extracted **clip** (not the full video)
-- VL model receives:
-  - Full video context (title + description + all subtitles) for thematic understanding
-  - Clip-local subtitles (timestamps relative to clip start)
-  - Up to 8 evenly-distributed sampling frames from the clip
-- System prompt explicitly states: "你看到的是从完整视频中提取出来的一个 clip（片段），下方字幕也只包含该 clip 范围"
-- Returns JSON: `{ shots: [{ start, end, label }] }` with times relative to clip start (0 = clip beginning)
+- **Two-stage process**:
+  1. **Scene Detection** (FFmpeg): Uses FFmpeg's scene change detection filter (`select=gt(scene,threshold)`) to identify precise frame-level boundaries
+  2. **Scene Classification** (VL Model): Labels each scene by analyzing a numbered grid image
+- Detailed workflow:
+  - FFmpeg detects scene boundaries with configurable threshold (default 0.3)
+  - Keyframes extracted at each scene's midpoint
+  - Grid image built from keyframes with numbered overlays
+  - VL model receives: grid image + subtitles + full video context
+  - VL model returns labels for each numbered scene
+- Shot timestamps derived from FFmpeg boundaries, rounded to millisecond precision
+- Scenes shorter than 0.5s are automatically filtered out
+- Adjacent scenes closer than 1s are merged to avoid over-segmentation
+- Results persisted to database with labels and metadata
+- If VL API unavailable, falls back to default `Shot N` labels
+- Returns JSON: `{ shots: [{ start, end, label }] }` with times relative to clip start
 
 ### Clip Extraction
 - Start/end times preserved to 1 decimal place (e.g., 130.1)
@@ -72,6 +83,7 @@ Each job gets a unique `jobId` (`job_{timestamp}_{random}`). Progress events are
 - SQLite database (`storage/cineclip.db`) is the single source of truth for all clip metadata
 - Updated after each successful render via Drizzle ORM inserts
 - `GET /api/gallery` queries the database with nested relations (author → post → clips → shots)
+- Response is sorted: posts by creation time, clips by start time, shots by index
 - `POST /api/gallery/refresh` re-queries the database (no filesystem scan needed)
 
 ## API Interfaces
@@ -107,13 +119,14 @@ Generate multi-frame grid screenshot for a clip.
 **Response**: `{ gridUrl: string }`
 
 ### POST /api/shots
-Segment shots from a clip using VL model.
+Segment shots from a clip using FFmpeg scene detection + VL labeling.
 
 **Request**: `{ clipUrl, clipId, subtitles?, videoTitle?, videoDescription?, jobId? }`
 **Response**: `{ shots: ShotInfo[], jobId: string }`
 
 - `videoTitle` and `videoDescription` are optional but strongly recommended — they provide full video context for more accurate shot labels
 - `subtitles` should be the **full** subtitle array (absolute timestamps); the server will compute clip-relative timestamps
+- The server first detects scene boundaries with FFmpeg, then extracts midpoint keyframes, builds a numbered grid image, and asks the VL model to label each scene in order
 
 ### GET /api/shots/:clipId
 List previously segmented shots for a clip.
@@ -150,8 +163,8 @@ Subscribe to job progress events.
 | YouTube Service | `server/services/youtube.ts` | Video metadata (incl. description), subtitle extraction, VTT parsing |
 | LLM Prompt | `server/services/llmPrompt.ts` | Centralized prompt building for all LLM/VL analysis modules |
 | LLM Service | `server/services/llm.ts` | Subtitle analysis, clip suggestion via OpenAI API |
-| Shot Segmentation | `server/services/shotSegmentation.ts` | VL-based shot segmentation within a clip |
-| FFmpeg Service | `server/services/ffmpeg.ts` | Video cutting, format conversion, subtitle overlay, grid generation |
+| Shot Segmentation | `server/services/shotSegmentation.ts` | FFmpeg scene detection + VL-based scene labeling within a clip |
+| FFmpeg Service | `server/services/ffmpeg.ts` | Video cutting, format conversion, subtitle overlay, scene detection, grid generation |
 | Render Service | `server/services/render.ts` | Clip rendering orchestration (cut + thumbnail) |
 | Progress Emitter | `server/services/progressEmitter.ts` | Server-side progress event bus (EventEmitter) |
 | WebSocket Manager | `server/services/wsManager.ts` | WS connection lifecycle, subscription management |
@@ -184,4 +197,5 @@ interface VideoContext {
 ### Design Rationale
 - Centralizing prompt building prevents drift between modules
 - Shot segmentation explicitly tells the model it's looking at a clip, not the full video
+- Shot segmentation prompt now also tells the model that each sampled image includes a yellow timestamp overlay, so labels can be aligned to scene order more easily
 - Full subtitles (not just clip-local ones) help the model understand thematic context

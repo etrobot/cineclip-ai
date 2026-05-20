@@ -66,7 +66,9 @@ export const clipsRelations = relations(clips, ({ one, many }) => ({
 export const shots = sqliteTable("shots", {
   id: integer("id", { mode: "number" }).primaryKey({ autoIncrement: true }),
   clipId: integer("clip_id", { mode: "number" }).references(() => clips.id),
+  sourceClipId: text("source_clip_id"),
   idx: integer("idx", { mode: "number" }).notNull(),
+  label: text("label"),
   clipUrl: text("clip_url"),
   thumbnailUrl: text("thumbnail_url"),
   size: integer("size", { mode: "number" }),

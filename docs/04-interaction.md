@@ -84,10 +84,11 @@
    - `clipUrl`, `clipId`
    - `subtitles` (full subtitles with absolute timestamps)
    - `videoTitle`, `videoDescription` (from analyze response)
-3. Server extracts sampling frames from the clip
-4. VL model analyzes frames + clip subtitles + full video context → shot boundaries
-5. Server cuts each shot via FFmpeg → `clips/shots/`
-6. UI displays nested shot cards under the parent clip
+3. Server uses FFmpeg to detect scene boundaries in the clip
+4. Server extracts one midpoint keyframe per scene and builds a numbered grid image
+5. VL model labels each scene using the grid + clip subtitles + full video context
+6. Server cuts each shot via FFmpeg → `clips/shots/`
+7. UI displays nested shot cards under the parent clip
 
 ### Path 5: Delete Clip
 1. User clicks trash icon on a clip card

@@ -104,6 +104,8 @@ export function buildShotSystemPrompt(): string {
 
 【规则】
 - start/end 是相对于 clip 起始的秒数（0 表示 clip 开头）
+- **时间必须精确到 0.1 秒**，例如 2.3、5.7、10.0，不要输出整数！
+- 示例：某个 shot 从第 2.3 秒开始，第 5.7 秒结束，应输出 {"start":2.3,"end":5.7,"label":"..."}
 - 时间范围必须在 [0, clipDuration] 内
 - shot 之间不能重叠
 - label 是简短描述该 shot 的内容，比如xx图表动画、工厂xx操作、办公室xxx、地球xxx`;
@@ -125,5 +127,5 @@ export function buildShotUserPrompt(
     `#${i + 1} [${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
   ).join('\n');
 
-  return `${contextBlock}\n\n【当前分析的是以下 clip】\nclip 时长：${clipDuration.toFixed(1)} 秒\nclip 内字幕：\n${clipSubtitleLines || '（无字幕）'}\n\n请结合整支视频的主题，将该 clip 分割成若干 shots，输出JSON。`;
+  return `${contextBlock}\n\n【当前分析的是以下 clip】\nclip 时长：${clipDuration.toFixed(1)} 秒\nclip 内字幕：\n${clipSubtitleLines || '（无字幕）'}\n\n每张采样图的左下角有黄色时间戳（如 0:02），表示该图在 clip 中的秒数，与字幕时间戳一致。\n\n请结合整支视频的主题，将该 clip 分割成若干 shots，输出JSON。`;
 }

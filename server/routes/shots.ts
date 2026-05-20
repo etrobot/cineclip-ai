@@ -1,8 +1,11 @@
 import { Router } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
+import { asc, eq, or } from 'drizzle-orm';
 import { segmentShots } from '../services/shotSegmentation';
 import { progressEmitter } from '../services/progressEmitter';
+import { db } from '../db';
+import { shots as shotsTable } from '../db/schema';
 
 export const shotsRoute = Router();
 
@@ -80,11 +83,44 @@ shotsRoute.post('/', async (req, res) => {
       : undefined;
 
     // Run segmentation
-    const shots = await segmentShots(clipPath, clipId, relativeSubtitles, videoCtx);
+    const shotSegments = await segmentShots(clipPath, clipId, relativeSubtitles, videoCtx);
 
-    progressEmitter.emitProgress(jid, 'complete', 100, `${shots.length} shots detected`);
+    const clipRecord = await db.query.clips.findFirst({
+      where: (c, { eq }) => eq(c.clipUrl, clipUrl),
+    });
 
-    res.json({ shots, jobId: jid });
+    const deleteConditions = [eq(shotsTable.sourceClipId, clipId)];
+    if (clipRecord) {
+      deleteConditions.push(eq(shotsTable.clipId, clipRecord.id));
+    }
+    await db.delete(shotsTable).where(
+      deleteConditions.length === 1
+        ? deleteConditions[0]
+        : or(...deleteConditions)
+    );
+
+    const shotRows = shotSegments.map((shot, idx) => {
+      const shotFileName = `${clipId}_shot_${idx}.mp4`;
+      const shotFilePath = path.join(process.cwd(), 'clips', 'shots', shotFileName);
+      const thumbnailUrl = shot.thumbnailUrl || `/api/clips/shots/thumbnails/${clipId}_shot_${idx}.jpg`;
+      return {
+        clipId: clipRecord?.id ?? null,
+        sourceClipId: clipId,
+        idx,
+        label: shot.label,
+        clipUrl: shot.clipUrl,
+        thumbnailUrl,
+        size: fs.existsSync(shotFilePath) ? fs.statSync(shotFilePath).size : 0,
+      };
+    });
+
+    if (shotRows.length > 0) {
+      await db.insert(shotsTable).values(shotRows);
+    }
+
+    progressEmitter.emitProgress(jid, 'complete', 100, `${shotSegments.length} shots detected`);
+
+    res.json({ shots: shotSegments, jobId: jid });
   } catch (error: any) {
     console.error('Shot segmentation error:', error);
     const message = error?.message || 'Failed to segment shots';
@@ -102,6 +138,51 @@ shotsRoute.get('/:clipId', async (req, res) => {
   const shotsDir = path.join(process.cwd(), 'clips', 'shots');
 
   try {
+    const bySourceId = await db.select({
+      idx: shotsTable.idx,
+      clipUrl: shotsTable.clipUrl,
+      thumbnailUrl: shotsTable.thumbnailUrl,
+      size: shotsTable.size,
+      label: shotsTable.label,
+    }).from(shotsTable).where(eq(shotsTable.sourceClipId, clipId)).orderBy(asc(shotsTable.idx));
+
+    if (bySourceId.length > 0) {
+      return res.json({
+        shots: bySourceId.map((shot, i) => ({
+          idx: shot.idx,
+          clipUrl: shot.clipUrl || `/api/clips/shots/${clipId}_shot_${i}.mp4`,
+          thumbnailUrl: shot.thumbnailUrl,
+          size: shot.size || 0,
+          label: shot.label || `Shot ${shot.idx + 1}`,
+          duration: '',
+        })),
+      });
+    }
+
+    const clipIdNum = Number(clipId);
+    if (Number.isFinite(clipIdNum)) {
+      const byDbClipId = await db.select({
+        idx: shotsTable.idx,
+        clipUrl: shotsTable.clipUrl,
+        thumbnailUrl: shotsTable.thumbnailUrl,
+        size: shotsTable.size,
+        label: shotsTable.label,
+      }).from(shotsTable).where(eq(shotsTable.clipId, clipIdNum)).orderBy(asc(shotsTable.idx));
+
+      if (byDbClipId.length > 0) {
+        return res.json({
+          shots: byDbClipId.map((shot) => ({
+            idx: shot.idx,
+            clipUrl: shot.clipUrl || '',
+            thumbnailUrl: shot.thumbnailUrl,
+            size: shot.size || 0,
+            label: shot.label || `Shot ${shot.idx + 1}`,
+            duration: '',
+          })),
+        });
+      }
+    }
+
     if (!fs.existsSync(shotsDir)) {
       return res.json({ shots: [] });
     }

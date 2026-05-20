@@ -49,6 +49,7 @@ chmod +x scripts/install-deps.sh
 OPENAI_BASE_URL="https://api.openai.com/v1"
 OPENAI_API_KEY="sk-your-actual-api-key-here"
 OPENAI_MODEL="gpt-4o-mini"
+VL_MODEL="gemini-2.0-flash-vision"
 ```
 
 ### 选项 2: OpenRouter (支持多种模型)
@@ -61,6 +62,7 @@ OPENAI_MODEL="gpt-4o-mini"
 OPENAI_BASE_URL="https://openrouter.ai/api/v1"
 OPENAI_API_KEY="sk-or-v1-your-api-key-here"
 OPENAI_MODEL="openai/gpt-4o-mini"
+VL_MODEL="gemini-2.0-flash-vision"
 # 或使用免费模型
 # OPENAI_MODEL="meta-llama/llama-3.2-3b-instruct:free"
 ```
@@ -68,6 +70,8 @@ OPENAI_MODEL="openai/gpt-4o-mini"
 ### 选项 3: 其他兼容 OpenAI API 的服务
 
 任何兼容 OpenAI API 格式的服务都可以使用，只需配置正确的 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY`。
+
+如果你需要使用“分镜拆分”功能，可以额外通过 `VL_MODEL` 指定视觉模型，默认值是 `gemini-2.0-flash-vision`。
 
 ## 测试 API 配置
 

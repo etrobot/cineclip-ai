@@ -210,8 +210,7 @@ async function addTimestampToBuffer(
   const totalSecs = Math.floor(timestamp);
   const mins = Math.floor(totalSecs / 60);
   const secs = totalSecs % 60;
-  const ms = Math.floor(((timestamp % 1) * 10 + 0.5) % 10);
-  const text = `${mins}:${secs.toString().padStart(2, '0')}.${ms}`;
+  const text = `${mins}:${secs.toString().padStart(2, '0')}`;
 
   // Create a small SVG overlay with the timestamp
   const fontSize = Math.max(12, Math.floor(width / 25));

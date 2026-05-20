@@ -343,6 +343,63 @@ export async function getVideoDuration(videoPath: string): Promise<number> {
   return info.duration;
 }
 
+/**
+ * Detect scene changes in a video using FFmpeg's select filter.
+ * Returns array of timestamps (in seconds) where scene changes occur.
+ * Threshold: 0.0-1.0, higher = less sensitive (default 0.3)
+ */
+export async function detectSceneChanges(
+  videoPath: string,
+  threshold: number = 0.3
+): Promise<number[]> {
+  if (!fs.existsSync(videoPath)) {
+    throw new Error(`Video file not found: ${videoPath}`);
+  }
+
+  // Use FFmpeg's select filter to detect scene changes
+  // The metadata shows pts_time when scene change is detected
+  const command = `ffmpeg -i "${videoPath}" -vf "select=gt(scene\\,${threshold}),showinfo" -f null - 2>&1 | grep "pts_time:" | sed 's/.*pts_time:\\([0-9.]*\\).*/\\1/'`;
+
+  try {
+    const { stdout } = await execAsync(command, { timeout: 120000 });
+
+    // Parse timestamps from output
+    const timestamps = stdout
+      .trim()
+      .split('\n')
+      .map(line => parseFloat(line.trim()))
+      .filter(t => !isNaN(t) && t > 0);
+
+    // Always include start (0) and end (duration)
+    const duration = await getVideoDuration(videoPath);
+    const allPoints = [0, ...timestamps, duration];
+
+    // Remove duplicates and sort
+    const unique = Array.from(new Set(allPoints.map(t => Math.round(t * 1000) / 1000))).sort((a, b) => a - b);
+
+    // Merge boundaries that are too close (< minGap seconds)
+    const minGap = 1.0; // Minimum gap between scenes (1 second)
+    const merged: number[] = [];
+    for (const t of unique) {
+      if (merged.length === 0 || t - merged[merged.length - 1] >= minGap) {
+        merged.push(t);
+      }
+    }
+    // Always ensure end boundary is included
+    if (merged[merged.length - 1] !== duration) {
+      merged[merged.length - 1] = duration;
+    }
+
+    console.log(`Scene detection: found ${timestamps.length} raw changes, merged to ${merged.length - 1} scenes`);
+    return merged;
+  } catch (error) {
+    console.error('Scene detection failed:', error);
+    // Fallback: return just start and end
+    const duration = await getVideoDuration(videoPath);
+    return [0, duration];
+  }
+}
+
 export function cleanupTempFiles(): number {
   const tempDir = getTempDir();
   let deletedCount = 0;

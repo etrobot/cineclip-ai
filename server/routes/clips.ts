@@ -35,7 +35,14 @@ clipsRoute.get("/list", async (_req, res) => {
 
     for (const post of posts) {
       const videoId = post.author?.platformId || String(post.id);
-      for (const clip of post.clips) {
+      const sortedClips = [...post.clips].sort((a, b) => {
+        const aStart = a.startTime ?? 0;
+        const bStart = b.startTime ?? 0;
+        if (aStart !== bStart) return aStart - bStart;
+        return (a.id ?? 0) - (b.id ?? 0);
+      });
+
+      for (const clip of sortedClips) {
         flatClips.push({
           id: String(clip.id),
           videoId,

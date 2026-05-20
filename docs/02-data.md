@@ -76,7 +76,9 @@ Stores segmented shot data within clips.
 |-------|------|-------------|
 | `id` | `INTEGER PK` | Shot unique ID |
 | `clipId` | `INTEGER FK` | References `clips.id` |
+| `sourceClipId` | `TEXT` | Source clip identifier (clipUrl-based) |
 | `idx` | `INTEGER` | Shot order index |
+| `label` | `TEXT` | Scene description label |
 | `clipUrl` | `TEXT` | Shot video URL |
 | `thumbnailUrl` | `TEXT` | Shot thumbnail URL |
 | `size` | `INTEGER` | File size in bytes |
@@ -171,6 +173,9 @@ interface ShotSegment {
 }
 ```
 
+- `start` and `end` are derived from FFmpeg scene boundaries and preserved to millisecond precision in server output
+- The `label` is generated per scene from the numbered grid, not from direct frame-by-frame boundary detection
+
 ### ProgressEvent
 ```typescript
 interface ProgressEvent {
@@ -191,6 +196,12 @@ YouTube URL
   → yt-dlp: download full video → videos/{videoId}.mp4
   → FFmpeg: extractClip() → clips/{videoId}_{start}_{end}.mp4
   → Sharp: generate thumbnail → clips/thumbnails/{clipId}.jpg
+  → Shot segmentation (optional):
+      → FFmpeg detectSceneChanges(): scene boundaries
+      → extract scene midpoint keyframes
+      → build numbered grid image
+      → VL model labels scenes → ShotSegment[]
+      → FFmpeg cuts shots → clips/shots/{clipId}_shot_{idx}.mp4
   → update clips.json (add clip to gallery)
 ```
 
