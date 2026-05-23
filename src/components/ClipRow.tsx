@@ -87,6 +87,8 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
     if (shotsLoading) return;
     if (!clip.clipUrl) return;
 
+    // Clear old shots immediately before re-segmentation
+    setShots([]);
     setShotsLoading(true);
     try {
       const result = await segmentShots(clip.clipUrl, clip.id, subtitles);

@@ -43,16 +43,52 @@ shotsRoute.post('/', async (req, res) => {
       return res.status(404).json({ error: `Clip file not found: ${clipFileName}` });
     }
 
+    // ── Retrieve clip record for DB cleanup ───────────────────────────
+    const clipRecord = await db.query.clips.findFirst({
+      where: (c, { eq }) => eq(c.clipUrl, clipUrl),
+    });
+
+    // ── Clear old shots BEFORE re-segmentation ────────────────────────
+    // NOTE: Must delete old files BEFORE segmentShots() generates new ones,
+    // or the cleanup will delete freshly created files.
+    const shotsDir = path.join(process.cwd(), 'clips', 'shots');
+    const thumbsDir = path.join(shotsDir, 'thumbnails');
+
+    // Delete old shot files on disk for this clipId
+    if (fs.existsSync(shotsDir)) {
+      const oldFiles = fs.readdirSync(shotsDir).filter(f => f.startsWith(`${clipId}_shot_`) && f.endsWith('.mp4'));
+      for (const f of oldFiles) {
+        try {
+          fs.unlinkSync(path.join(shotsDir, f));
+          const thumbName = f.replace('.mp4', '.jpg');
+          const thumbPath = path.join(thumbsDir, thumbName);
+          if (fs.existsSync(thumbPath)) {
+            fs.unlinkSync(thumbPath);
+          }
+        } catch (err) {
+          console.warn(`Failed to delete old shot file: ${f}`, err);
+        }
+      }
+    }
+
+    // Delete old shot records from DB
+    const deleteConditions = [eq(shotsTable.sourceClipId, clipId)];
+    if (clipRecord) {
+      deleteConditions.push(eq(shotsTable.clipId, clipRecord.id));
+    }
+    await db.delete(shotsTable).where(
+      deleteConditions.length === 1
+        ? deleteConditions[0]
+        : or(...deleteConditions)
+    );
+
     progressEmitter.emitProgress(jid, 'extracting', 5, 'Extracting sampling frames...');
 
     // Adjust subtitle timestamps to be relative to clip start
-    // We need to know the clip's absolute start time from the filename
     let relativeSubtitles: Array<{ start: number; end: number; text: string }> | undefined;
     let fullSubtitles: Array<{ start: number; end: number; text: string }> = [];
     if (subtitles && Array.isArray(subtitles)) {
       fullSubtitles = subtitles;
-      // Parse clip start time from filename pattern: videoId_START_END.mp4
-      // e.g. "eV3lAY77IpU_0p6_130p1.mp4" -> start=0.6
       const baseName = path.parse(clipFileName).name;
       const parts = baseName.split('_');
       let clipStartTime = 0;
@@ -65,7 +101,6 @@ shotsRoute.post('/', async (req, res) => {
         }
       }
 
-      // Convert absolute subtitle timestamps to relative ones
       relativeSubtitles = subtitles
         .filter(s => s.end > clipStartTime)
         .map(s => ({
@@ -84,20 +119,6 @@ shotsRoute.post('/', async (req, res) => {
 
     // Run segmentation
     const shotSegments = await segmentShots(clipPath, clipId, relativeSubtitles, videoCtx);
-
-    const clipRecord = await db.query.clips.findFirst({
-      where: (c, { eq }) => eq(c.clipUrl, clipUrl),
-    });
-
-    const deleteConditions = [eq(shotsTable.sourceClipId, clipId)];
-    if (clipRecord) {
-      deleteConditions.push(eq(shotsTable.clipId, clipRecord.id));
-    }
-    await db.delete(shotsTable).where(
-      deleteConditions.length === 1
-        ? deleteConditions[0]
-        : or(...deleteConditions)
-    );
 
     const shotRows = shotSegments.map((shot, idx) => {
       const shotFileName = `${clipId}_shot_${idx}.mp4`;

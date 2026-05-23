@@ -4,9 +4,16 @@ import * as schema from "./schema";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
 import { fileURLToPath } from "url";
+import * as fs from "fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.resolve(process.cwd(), "storage", "cineclip.db");
+
+// Ensure storage directory exists before opening database
+const storageDir = path.dirname(DB_PATH);
+if (!fs.existsSync(storageDir)) {
+  fs.mkdirSync(storageDir, { recursive: true });
+}
 
 const sqlite = new Database(DB_PATH);
 sqlite.pragma("journal_mode = WAL");

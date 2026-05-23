@@ -43,11 +43,11 @@ deleteRoute.post('/', async (req, res) => {
       }
     }
 
-    // Delete associated DB records
-    const clipRecord = await db.query.clips.findFirst({
+    // Delete ALL associated DB records (handle duplicates)
+    const allClipRecords = await db.query.clips.findMany({
       where: (c, { eq }) => eq(c.clipUrl, clipUrl),
     });
-    if (clipRecord) {
+    for (const clipRecord of allClipRecords) {
       await db.delete(shots).where(eq(shots.clipId, clipRecord.id));
       await db.delete(clips).where(eq(clips.id, clipRecord.id));
     }

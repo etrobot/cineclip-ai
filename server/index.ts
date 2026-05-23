@@ -15,11 +15,22 @@ import { shotsRoute } from './routes/shots';
 import { clipsRoute } from './routes/clips';
 import { wsManager } from './services/wsManager';
 import { runMigrations } from './db';
+import { runConsistencyCheck, printConsistencyReport } from './services/consistencyCheck';
 
 dotenv.config({ override: true });
 
 // Run database migrations on startup
 runMigrations();
+
+// Run consistency check on startup (report only, no auto-cleanup to avoid race conditions with in-flight requests)
+setTimeout(async () => {
+  try {
+    const report = await runConsistencyCheck();
+    printConsistencyReport(report);
+  } catch (err) {
+    console.error('Consistency check failed:', err);
+  }
+}, 0);
 
 const app = express();
 const server = createServer(app);

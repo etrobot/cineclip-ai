@@ -146,17 +146,28 @@ renderRoute.post('/', async (req, res) => {
       const secs = Math.floor(durationSec % 60);
       const durationStr = `${mins}:${secs.toString().padStart(2, '0')}`;
 
-      await db.insert(clipsTable).values({
-        originalPostId: post.id,
-        fileName: clipFileName,
-        clipUrl,
-        thumbnailUrl,
-        startTime: start,
-        endTime: end,
-        duration: durationStr,
-        title: title || clipFileName,
-        size: fs.statSync(outputPath).size,
+      // Check if the exact same clip already exists to avoid duplicates
+      const existingClip = await db.query.clips.findFirst({
+        where: (c, { eq, and }) => and(
+          eq(c.originalPostId, post.id),
+          eq(c.startTime, start),
+          eq(c.endTime, end)
+        ),
       });
+
+      if (!existingClip) {
+        await db.insert(clipsTable).values({
+          originalPostId: post.id,
+          fileName: clipFileName,
+          clipUrl,
+          thumbnailUrl,
+          startTime: start,
+          endTime: end,
+          duration: durationStr,
+          title: title || clipFileName,
+          size: fs.statSync(outputPath).size,
+        });
+      }
     }
 
     res.json({ outputPath, clipUrl, thumbnailUrl, jobId: jid });
