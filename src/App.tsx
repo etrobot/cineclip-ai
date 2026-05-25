@@ -5,11 +5,13 @@ import GlowBackground from "./components/GlowBackground";
 import { ClipRow } from "./components/ClipRow";
 import { motion, AnimatePresence } from "motion/react";
 import { LogOut, Plus, Trash2 } from "lucide-react";
+import { ShotSearch } from "./components/ShotSearch";
 import {
   analyzeVideo,
   subscribeProgress,
   generateJobId,
   deleteClip,
+  clearGallery,
   listClips,
   renderClip,
   type Clip,
@@ -371,11 +373,18 @@ export default function App() {
     [renderAllClips]
   );
 
-  const handleClearGallery = useCallback(() => {
+  const handleClearGallery = useCallback(async () => {
     console.log("[ClearGallery] clearing all clips and returning home");
     setAnalyzedClips([]);
     setVideoData(null);
     setView("home");
+
+    try {
+      await clearGallery();
+      console.log("[ClearGallery] server clear ok");
+    } catch (err) {
+      console.error("[ClearGallery] server clear failed:", err);
+    }
   }, []);
 
   const handleGoToGallery = useCallback(() => {
@@ -463,6 +472,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="flex items-center gap-4">
+                  <ShotSearch />
                   <button
                     onClick={() => setView("home")}
                     className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-white"

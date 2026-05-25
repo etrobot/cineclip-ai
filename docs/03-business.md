@@ -23,11 +23,12 @@ User Input (YouTube URL)
   │
   ├─ 4. Shot Segmentation (Optional) ─────────────────────────
   │   ├─ FFmpeg: detect scene boundaries in the clip
-  │   ├─ Extract one keyframe from each scene midpoint
-  │   ├─ Build numbered grid image for all scenes
-  │   ├─ VL Model: label each scene from grid + subtitles + full video context → Shot[]
-  │   ├─ FFmpeg: cut each shot → clips/shots/{clipId}_shot_{idx}.mp4
-  │   └─ Generate thumbnails for each shot
+  │   ├─ Extract one keyframe from each scene's first frame
+  │   ├─ Build grid image with yellow timestamp overlays (m:ss.xxxxxx)
+  │   ├─ VL Model: label + categorize each scene from grid + subtitles + context → Shot[]
+  │   ├─ FFmpeg: reencode-cut each shot → clips/shots/{clipId}_shot_{idx}.mp4
+  │   ├─ Generate thumbnails for each shot
+  │   └─ Save grid image to clips/shots/{clipId}_grid.jpg
   │
   └─ 5. Gallery ──────────────────────────────────────────────
       └─ Read clips.json → display grouped clips (with shots nested)
@@ -60,24 +61,27 @@ Each job gets a unique `jobId` (`job_{timestamp}_{random}`). Progress events are
 - Operates on an already-extracted **clip** (not the full video)
 - **Two-stage process**:
   1. **Scene Detection** (FFmpeg): Uses FFmpeg's scene change detection filter (`select=gt(scene,threshold)`) to identify precise frame-level boundaries
-  2. **Scene Classification** (VL Model): Labels each scene by analyzing a numbered grid image
+  2. **Scene Classification** (VL Model): Labels each scene by analyzing a grid image with timestamp overlays
 - Detailed workflow:
   - FFmpeg detects scene boundaries with configurable threshold (default 0.3)
-  - Keyframes extracted at each scene's midpoint
-  - Grid image built from keyframes with numbered overlays
-  - VL model receives: grid image + subtitles + full video context
-  - VL model returns labels for each numbered scene
-- Shot timestamps derived from FFmpeg boundaries, rounded to millisecond precision
-- Scenes shorter than 0.5s are automatically filtered out
-- Adjacent scenes closer than 1s are merged to avoid over-segmentation
-- Results persisted to database with labels and metadata
-- If VL API unavailable, falls back to default `Shot N` labels
-- Returns JSON: `{ shots: [{ start, end, label }] }` with times relative to clip start
+  - Keyframes extracted at each scene's first frame
+  - Grid image built from keyframes with yellow timestamp overlays (format: `m:ss.xxxxxx`, microsecond precision)
+  - VL model receives: grid image + subtitles + full video context (single unified prompt)
+  - VL model returns: `{ start, end, label, category }` for each shot segment
+  - Shot boundaries are snapped to the nearest scene boundary via `snapToBoundary()`
+  - Adjacent shots with the same label are automatically merged
+- **Timestamp precision**: Microsecond-level (6 decimal places) preserved throughout the pipeline — no rounding or truncation
+- **Shot cutting**: Uses FFmpeg reencode (not stream copy) for frame-accurate cuts
+- **Category classification**: Each shot gets a category tag (讲座, 标题, 图表, 纪录, 卡通, 访谈, 新闻主持人, etc.)
+- **Grid image**: Saved to `clips/shots/{clipId}_grid.jpg` and returned as `gridUrl` in the response
+- **Error handling**: No fallback — if VL model or FFmpeg fails, the error is thrown directly
+- Results persisted to database with label, category, start, end, duration, and metadata
+- Returns JSON: `{ shots: [{ start, end, label, category, clipUrl, thumbnailUrl, duration }], gridUrl }` with times relative to clip start
 
 ### Clip Extraction
 - Start/end times preserved to 1 decimal place (e.g., 130.1)
 - Filename format: `{videoId}_{start}p{end}.mp4` (dots → `p` for filesystem safety)
-- Codec `copy` used by default (no re-encode); re-encode available for overlay needs
+- Codec `copy` used for clip extraction; shot segmentation uses reencode for frame-accurate cuts
 
 ### Gallery State
 - SQLite database (`storage/cineclip.db`) is the single source of truth for all clip metadata
@@ -122,11 +126,25 @@ Generate multi-frame grid screenshot for a clip.
 Segment shots from a clip using FFmpeg scene detection + VL labeling.
 
 **Request**: `{ clipUrl, clipId, subtitles?, videoTitle?, videoDescription?, jobId? }`
-**Response**: `{ shots: ShotInfo[], jobId: string }`
+**Response**: `{ shots: ShotInfo[], gridUrl: string, jobId: string }`
 
 - `videoTitle` and `videoDescription` are optional but strongly recommended — they provide full video context for more accurate shot labels
 - `subtitles` should be the **full** subtitle array (absolute timestamps); the server will compute clip-relative timestamps
-- The server first detects scene boundaries with FFmpeg, then extracts midpoint keyframes, builds a numbered grid image, and asks the VL model to label each scene in order
+- The server detects scene boundaries with FFmpeg, extracts keyframes at scene starts, builds a grid image with timestamp overlays, and asks the VL model to label and categorize each shot
+- Each shot includes `category` (e.g. 讲座, 标题, 图表, 纪录, 卡通, 访谈, 新闻主持人)
+- Shot cutting uses reencode for frame-accurate cuts (not stream copy)
+- The grid image is saved to disk and its URL returned as `gridUrl`
+
+### GET /api/shots/search?q=keyword
+Search shots by label or category keyword, grouped by source clip.
+
+**Query params**: `q` (required) — search keyword
+**Response**: `{ query: string, results: ShotSearchGroup[] }`
+
+- Searches `label` and `category` fields with LIKE matching
+- Results are LEFT JOINed with `clips` table to include parent clip info
+- Grouped by `sourceClipId` — same clip's matching shots appear together
+- Each group contains: clip metadata + array of matching shots
 
 ### GET /api/shots/:clipId
 List previously segmented shots for a clip.
@@ -163,12 +181,12 @@ Subscribe to job progress events.
 | YouTube Service | `server/services/youtube.ts` | Video metadata (incl. description), subtitle extraction, VTT parsing |
 | LLM Prompt | `server/services/llmPrompt.ts` | Centralized prompt building for all LLM/VL analysis modules |
 | LLM Service | `server/services/llm.ts` | Subtitle analysis, clip suggestion via OpenAI API |
-| Shot Segmentation | `server/services/shotSegmentation.ts` | FFmpeg scene detection + VL-based scene labeling within a clip |
+| Shot Segmentation | `server/services/shotSegmentation.ts` | FFmpeg scene detection + VL-based scene labeling + category classification within a clip |
 | FFmpeg Service | `server/services/ffmpeg.ts` | Video cutting, format conversion, subtitle overlay, scene detection, grid generation |
 | Render Service | `server/services/render.ts` | Clip rendering orchestration (cut + thumbnail) |
 | Progress Emitter | `server/services/progressEmitter.ts` | Server-side progress event bus (EventEmitter) |
 | WebSocket Manager | `server/services/wsManager.ts` | WS connection lifecycle, subscription management |
-| Grid Service | `server/services/grid.ts` | Multi-frame grid screenshot generation |
+| Grid Service | `server/services/grid.ts` | Multi-frame grid screenshot generation; exports shared functions (extractFrameAt, getSceneTimestamps, addTimestampToBuffer, MAX_GRID_*) for shotSegmentation reuse |
 | yt-dlp Utils | `server/utils/ytDlp.ts` | Shell execution wrapper for yt-dlp |
 
 ### Frontend Modules
@@ -197,5 +215,7 @@ interface VideoContext {
 ### Design Rationale
 - Centralizing prompt building prevents drift between modules
 - Shot segmentation explicitly tells the model it's looking at a clip, not the full video
-- Shot segmentation prompt now also tells the model that each sampled image includes a yellow timestamp overlay, so labels can be aligned to scene order more easily
-- Full subtitles (not just clip-local ones) help the model understand thematic context
+- Shot segmentation prompt uses a single unified systemContent (not separate system + user prompts) — the grid image and text context are combined to avoid confusing the model
+- Grid image timestamps are yellow overlays in `m:ss.xxxxxx` format (microsecond precision), and the prompt provides the exact list of available timestamps for the model to choose from
+- The prompt uses real category examples (讲座, 标题, 图表, 纪录, etc.) instead of placeholder labels to prevent the VL model from generating generic "描述" labels
+- No fallback: if VL model returns invalid JSON or unexpected format, the error is thrown directly rather than falling back to generic labels

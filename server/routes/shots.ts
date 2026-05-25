@@ -1,13 +1,115 @@
 import { Router } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
-import { asc, eq, or } from 'drizzle-orm';
+import { asc, eq, or, like, sql } from 'drizzle-orm';
 import { segmentShots } from '../services/shotSegmentation';
 import { progressEmitter } from '../services/progressEmitter';
 import { db } from '../db';
-import { shots as shotsTable } from '../db/schema';
+import { shots as shotsTable, clips as clipsTable } from '../db/schema';
 
 export const shotsRoute = Router();
+
+/**
+ * GET /api/shots/search?q=keyword
+ * Search shots by label or category, grouped by sourceClipId with clip info
+ */
+shotsRoute.get('/search', async (req, res) => {
+  const q = req.query.q as string;
+  if (!q || q.trim().length === 0) {
+    return res.status(400).json({ error: 'Search query parameter "q" is required' });
+  }
+
+  const keyword = `%${q.trim()}%`;
+
+  const rows = await db
+    .select({
+      id: shotsTable.id,
+      sourceClipId: shotsTable.sourceClipId,
+      idx: shotsTable.idx,
+      label: shotsTable.label,
+      category: shotsTable.category,
+      start: shotsTable.start,
+      end: shotsTable.end,
+      duration: shotsTable.duration,
+      clipUrl: shotsTable.clipUrl,
+      thumbnailUrl: shotsTable.thumbnailUrl,
+      size: shotsTable.size,
+      // clip fields via JOIN
+      clipFileName: clipsTable.fileName,
+      clipClipUrl: clipsTable.clipUrl,
+      clipThumbnailUrl: clipsTable.thumbnailUrl,
+      clipTitle: clipsTable.title,
+      clipStartTime: clipsTable.startTime,
+      clipEndTime: clipsTable.endTime,
+      clipDuration: clipsTable.duration,
+    })
+    .from(shotsTable)
+    .leftJoin(clipsTable, eq(shotsTable.clipId, clipsTable.id))
+    .where(or(
+      like(shotsTable.label, keyword),
+      like(shotsTable.category, keyword),
+    ))
+    .orderBy(asc(shotsTable.sourceClipId), asc(shotsTable.idx));
+
+  // Group by sourceClipId
+  const groups: Record<string, {
+    sourceClipId: string;
+    clip: {
+      fileName: string | null;
+      clipUrl: string | null;
+      thumbnailUrl: string | null;
+      title: string | null;
+      startTime: number | null;
+      endTime: number | null;
+      duration: string | null;
+    };
+    shots: Array<{
+      id: number;
+      idx: number;
+      label: string | null;
+      category: string | null;
+      start: number | null;
+      end: number | null;
+      duration: string | null;
+      clipUrl: string | null;
+      thumbnailUrl: string | null;
+      size: number | null;
+    }>;
+  }> = {};
+
+  for (const row of rows) {
+    const key = row.sourceClipId || `unknown_${row.id}`;
+    if (!groups[key]) {
+      groups[key] = {
+        sourceClipId: key,
+        clip: {
+          fileName: row.clipFileName,
+          clipUrl: row.clipClipUrl,
+          thumbnailUrl: row.clipThumbnailUrl,
+          title: row.clipTitle,
+          startTime: row.clipStartTime,
+          endTime: row.clipEndTime,
+          duration: row.clipDuration,
+        },
+        shots: [],
+      };
+    }
+    groups[key].shots.push({
+      id: row.id,
+      idx: row.idx,
+      label: row.label,
+      category: row.category,
+      start: row.start,
+      end: row.end,
+      duration: row.duration,
+      clipUrl: row.clipUrl,
+      thumbnailUrl: row.thumbnailUrl,
+      size: row.size,
+    });
+  }
+
+  res.json({ query: q, results: Object.values(groups) });
+});
 
 /**
  * POST /api/shots
@@ -118,7 +220,7 @@ shotsRoute.post('/', async (req, res) => {
       : undefined;
 
     // Run segmentation
-    const shotSegments = await segmentShots(clipPath, clipId, relativeSubtitles, videoCtx);
+    const { shots: shotSegments, gridUrl } = await segmentShots(clipPath, clipId, relativeSubtitles, videoCtx);
 
     const shotRows = shotSegments.map((shot, idx) => {
       const shotFileName = `${clipId}_shot_${idx}.mp4`;
@@ -129,6 +231,10 @@ shotsRoute.post('/', async (req, res) => {
         sourceClipId: clipId,
         idx,
         label: shot.label,
+        category: shot.category,
+        start: shot.start,
+        end: shot.end,
+        duration: shot.duration,
         clipUrl: shot.clipUrl,
         thumbnailUrl,
         size: fs.existsSync(shotFilePath) ? fs.statSync(shotFilePath).size : 0,
@@ -141,7 +247,7 @@ shotsRoute.post('/', async (req, res) => {
 
     progressEmitter.emitProgress(jid, 'complete', 100, `${shotSegments.length} shots detected`);
 
-    res.json({ shots: shotSegments, jobId: jid });
+    res.json({ shots: shotSegments, gridUrl, jobId: jid });
   } catch (error: any) {
     console.error('Shot segmentation error:', error);
     const message = error?.message || 'Failed to segment shots';

@@ -1,5 +1,8 @@
 import { Router } from "express";
+import * as path from "path";
+import * as fs from "fs";
 import { db } from "../db";
+import { clips, shots, author, originalPost } from "../db/schema";
 
 export const galleryRoute = Router();
 
@@ -90,5 +93,52 @@ galleryRoute.post("/refresh", async (_req, res) => {
   res.json({
     updatedAt: new Date().toISOString(),
     groups: buildGalleryResponse(posts),
+  });
+});
+
+/**
+ * POST /api/gallery/clear
+ * Clears all clips, shots, posts, authors from the database,
+ * and deletes all local clip/thumbnail/shot video files.
+ */
+galleryRoute.post("/clear", async (_req, res) => {
+  // 1. Delete all DB records (order matters due to foreign keys: shots → clips → posts → authors)
+  await db.delete(shots);
+  await db.delete(clips);
+  await db.delete(originalPost);
+  await db.delete(author);
+
+  // 2. Delete all local video/thumbnail/shot files under clips/
+  const clipsDir = path.join(process.cwd(), "clips");
+  const deletedFiles: string[] = [];
+
+  const dirsToClean = [
+    clipsDir,
+    path.join(clipsDir, "thumbnails"),
+    path.join(clipsDir, "shots"),
+    path.join(clipsDir, "shots", "thumbnails"),
+  ];
+
+  for (const dir of dirsToClean) {
+    if (fs.existsSync(dir)) {
+      const files = fs.readdirSync(dir);
+      for (const file of files) {
+        // Only delete media files, skip directories and hidden files
+        const filePath = path.join(dir, file);
+        if (fs.statSync(filePath).isFile() && !file.startsWith(".")) {
+          fs.unlinkSync(filePath);
+          deletedFiles.push(filePath);
+        }
+      }
+    }
+  }
+
+  console.log("[Gallery] Clear: deleted", deletedFiles.length, "files, cleared all DB records");
+
+  res.json({
+    success: true,
+    deletedFiles: deletedFiles.length,
+    updatedAt: new Date().toISOString(),
+    groups: [],
   });
 });

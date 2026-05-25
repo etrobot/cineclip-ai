@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw } from "lucide-react";
+import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw, Grid2x2 } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import { API_BASE_URL, segmentShots, listShots, getServerConfig, type ShotInfo, type SubtitleItem } from "../api/client";
 import type { ClipItem } from "../App";
@@ -33,6 +33,8 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
   const [shotsLoading, setShotsLoading] = useState(false);
   const [showShots, setShowShots] = useState(false);
   const [vlEnabled, setVlEnabled] = useState<boolean | null>(null);
+  const [gridUrl, setGridUrl] = useState<string>('');
+  const [showGrid, setShowGrid] = useState(false);
 
   const handlePlay = () => {
     if (clip.clipUrl) {
@@ -93,6 +95,9 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
     try {
       const result = await segmentShots(clip.clipUrl, clip.id, subtitles);
       setShots(result.shots);
+      if (result.gridUrl) {
+        setGridUrl(result.gridUrl);
+      }
       setShowShots(true);
     } catch (err) {
       console.error("Failed to detect shots:", err);
@@ -243,20 +248,57 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
 
           {/* Bottom: Shots toggle */}
           <div className="mt-2 space-y-2">
-            {/* Shots toggle */}
+            {/* Shots + Grid toggle */}
             {shots.length > 0 && (
-              <button
-                onClick={() => setShowShots(!showShots)}
-                className="flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-emerald-400 transition-colors py-1"
-              >
-                {showShots ? (
-                  <ChevronUp className="w-3.5 h-3.5" />
-                ) : (
-                  <ChevronDown className="w-3.5 h-3.5" />
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setShowShots(!showShots)}
+                  className="flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-emerald-400 transition-colors py-1"
+                >
+                  {showShots ? (
+                    <ChevronUp className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  )}
+                  {shots.length} shot{shots.length > 1 ? 's' : ''} detected
+                </button>
+                {gridUrl && (
+                  <button
+                    onClick={() => setShowGrid(!showGrid)}
+                    className="flex items-center gap-1.5 text-[11px] text-zinc-500 hover:text-amber-400 transition-colors py-1"
+                  >
+                    <Grid2x2 className="w-3.5 h-3.5" />
+                    {showGrid ? 'Hide' : 'Show'} grid
+                  </button>
                 )}
-                {shots.length} shot{shots.length > 1 ? 's' : ''} detected
-              </button>
+              </div>
             )}
+
+            {/* Grid image preview */}
+            <AnimatePresence>
+              {showGrid && gridUrl && (
+                <motion.div
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  transition={{ duration: 0.2 }}
+                  className="overflow-hidden"
+                >
+                  <a
+                    href={gridUrl.startsWith('http') ? gridUrl : `${API_BASE_URL}${gridUrl}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block rounded-lg overflow-hidden border border-zinc-800 hover:border-zinc-600 transition-colors"
+                  >
+                    <img
+                      src={gridUrl.startsWith('http') ? gridUrl : `${API_BASE_URL}${gridUrl}`}
+                      alt="Scene grid"
+                      className="w-full h-auto"
+                    />
+                  </a>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Shots list */}
             <AnimatePresence>
@@ -308,6 +350,7 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
                         </div>
                         <div className="px-1.5 py-1">
                           <p className="text-[10px] text-zinc-400 truncate">{shot.label}</p>
+                          {shot.category && <p className="text-[9px] text-zinc-600 truncate">{shot.category}</p>}
                         </div>
                       </div>
                     ))}

@@ -28,7 +28,7 @@
 |------|---------|
 | yt-dlp | YouTube subtitle extraction & video download |
 | FFmpeg | Video cutting, format conversion, subtitle overlay, scene detection, keyframe extraction |
-| Sharp | Thumbnail generation |
+| Sharp | Thumbnail generation, grid image composition, timestamp overlay |
 | OpenAI API | LLM content analysis (clip suggestion) |
 
 ### Python / yt-dlp

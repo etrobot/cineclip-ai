@@ -9,8 +9,11 @@ project-root/
 ├── clips/               # Extracted clip segments
 │   ├── thumbnails/      # Clip thumbnail images
 │   │   └── {clipId}.jpg
-│   ├── shots/           # Shot segments
-│   │   └── {clipId}_shot_{idx}.mp4
+│   ├── shots/           # Shot segments + grid images
+│   │   ├── {clipId}_grid.jpg         # Grid composite image
+│   │   ├── {clipId}_shot_{idx}.mp4   # Shot video clips
+│   │   └── thumbnails/
+│   │       └── {clipId}_shot_{idx}.jpg
 │   └── {videoId}_{start}_{end}.mp4
 ├── storage/             # Persistent storage
 │   ├── cineclip.db      # SQLite database (metadata, single source of truth)
@@ -79,6 +82,10 @@ Stores segmented shot data within clips.
 | `sourceClipId` | `TEXT` | Source clip identifier (clipUrl-based) |
 | `idx` | `INTEGER` | Shot order index |
 | `label` | `TEXT` | Scene description label |
+| `category` | `TEXT` | Shot category (e.g. 讲座, 标题, 图表, 纪录, 卡通, 访谈, 新闻主持人) |
+| `start` | `REAL` | Shot start time in seconds (microsecond precision) |
+| `end` | `REAL` | Shot end time in seconds (microsecond precision) |
+| `duration` | `TEXT` | Human-readable duration |
 | `clipUrl` | `TEXT` | Shot video URL |
 | `thumbnailUrl` | `TEXT` | Shot thumbnail URL |
 | `size` | `INTEGER` | File size in bytes |
@@ -120,7 +127,50 @@ Stores segmented shot data within clips.
 | `thumbnailUrl` | `string` | Shot thumbnail URL |
 | `size` | `number` | File size |
 | `label` | `string` | Shot description |
+| `category` | `string` | Shot category |
 | `duration` | `string` | Human-readable duration |
+
+**ShotSearchResponse** (returned by `GET /api/shots/search`)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `query` | `string` | Search keyword |
+| `results` | `ShotSearchGroup[]` | Grouped results |
+
+**ShotSearchGroup**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sourceClipId` | `string` | Source clip identifier |
+| `clip` | `ShotSearchClip` | Parent clip info |
+| `shots` | `ShotSearchShot[]` | Matching shots |
+
+**ShotSearchClip**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `fileName` | `string \| null` | MP4 filename |
+| `clipUrl` | `string \| null` | Clip video URL |
+| `thumbnailUrl` | `string \| null` | Clip thumbnail URL |
+| `title` | `string \| null` | Clip title |
+| `startTime` | `number \| null` | Clip start time |
+| `endTime` | `number \| null` | Clip end time |
+| `duration` | `string \| null` | Human-readable duration |
+
+**ShotSearchShot**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `number` | Shot DB ID |
+| `idx` | `number` | Shot index |
+| `label` | `string \| null` | Scene description |
+| `category` | `string \| null` | Shot category |
+| `start` | `number \| null` | Start time (seconds) |
+| `end` | `number \| null` | End time (seconds) |
+| `duration` | `string \| null` | Human-readable duration |
+| `clipUrl` | `string \| null` | Shot video URL |
+| `thumbnailUrl` | `string \| null` | Shot thumbnail URL |
+| `size` | `number \| null` | File size |
 
 ### metadata.json
 

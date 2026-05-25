@@ -56,6 +56,30 @@ deleteRoute.post('/', async (req, res) => {
     const sourceClipId = path.parse(clipFileName).name;
     await db.delete(shots).where(eq(shots.sourceClipId, sourceClipId));
 
+    // Delete associated shot video files and their thumbnails
+    const shotsDir = path.join(clipsDir, 'shots');
+    const shotsThumbsDir = path.join(shotsDir, 'thumbnails');
+
+    if (fs.existsSync(shotsDir)) {
+      const shotFiles = fs.readdirSync(shotsDir).filter(
+        (f) => f.startsWith(`${sourceClipId}_shot_`) && f.endsWith('.mp4')
+      );
+      for (const f of shotFiles) {
+        const shotPath = path.join(shotsDir, f);
+        if (fs.existsSync(shotPath)) {
+          fs.unlinkSync(shotPath);
+          deleted.push(shotPath);
+        }
+        // Delete corresponding shot thumbnail
+        const thumbName = f.replace('.mp4', '.jpg');
+        const thumbPath = path.join(shotsThumbsDir, thumbName);
+        if (fs.existsSync(thumbPath)) {
+          fs.unlinkSync(thumbPath);
+          deleted.push(thumbPath);
+        }
+      }
+    }
+
     res.json({ success: true, deleted });
   } catch (error: any) {
     console.error('Delete error:', error);

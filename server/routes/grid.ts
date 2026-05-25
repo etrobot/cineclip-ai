@@ -43,8 +43,6 @@ gridRoute.post('/', async (req, res) => {
 
     // Generate grid using TypeScript service (ffmpeg + sharp)
     await generateVideoGrid(clipPath, {
-      fps,
-      diffThreshold,
       maxGridSize,
     });
 

@@ -3,77 +3,9 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
+import { detectSceneChanges } from './ffmpeg';
 
 const execAsync = promisify(exec);
-
-const TARGET_WIDTH = 256;
-const TOP_RATIO = 2 / 3;
-
-/**
- * Extract frames from video at given FPS using ffmpeg.
- * Returns array of { data: Buffer<raw RGBA>, width, height, timestamp }.
- */
-interface ExtractedFrame {
-  jpegBuf: Buffer;
-  width: number;
-  height: number;
-  timestamp: number;
-}
-
-async function extractFrames(
-  videoPath: string,
-  fps: number = 2.0
-): Promise<ExtractedFrame[]> {
-  const frames: ExtractedFrame[] = [];
-  // Use ffmpeg to extract frames as JPEG to temp dir, then read with sharp
-  const tempDir = path.join(process.cwd(), 'storage', 'temp', `grid_${Date.now()}`);
-  fs.mkdirSync(tempDir, { recursive: true });
-
-  try {
-    // Extract frames as JPEGs
-    const pattern = path.join(tempDir, 'frame_%04d.jpg');
-    await execAsync(
-      `ffmpeg -i "${videoPath}" -vf "fps=${fps}" -q:v 4 -y "${pattern}"`,
-      { timeout: 60000 }
-    );
-
-    // Read extracted frames
-    const frameFiles = fs.readdirSync(tempDir)
-      .filter(f => f.startsWith('frame_') && f.endsWith('.jpg'))
-      .sort();
-
-    for (const file of frameFiles) {
-      const filePath = path.join(tempDir, file);
-      const jpegBuf = fs.readFileSync(filePath);
-      const meta = await sharp(jpegBuf).metadata();
-
-      // Parse timestamp from frame number
-      const frameNum = parseInt(file.replace('frame_', '').replace('.jpg', ''), 10);
-      const timestamp = (frameNum - 1) / fps;
-
-      frames.push({
-        jpegBuf,
-        width: meta.width || 480,
-        height: meta.height || 270,
-        timestamp,
-      });
-    }
-
-    return frames;
-  } finally {
-    // Cleanup temp files
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    } catch {}
-  }
-}
-
-async function getVideoDuration(videoPath: string): Promise<number> {
-  const { stdout } = await execAsync(
-    `ffprobe -v error -show_entries format=duration -of csv=p=0 "${videoPath}"`
-  );
-  return parseFloat(stdout.trim()) || 0;
-}
 
 async function getVideoResolution(videoPath: string): Promise<{ width: number; height: number }> {
   const { stdout } = await execAsync(
@@ -84,77 +16,82 @@ async function getVideoResolution(videoPath: string): Promise<{ width: number; h
 }
 
 /**
- * Process top region of a JPEG frame for diff comparison.
- * Uses sharp to crop top 2/3, resize to TARGET_WIDTH, convert to grayscale.
+ * Extract a single frame at a specific timestamp from a video.
  */
-async function processFrameTopRegion(frame: ExtractedFrame): Promise<Float32Array | null> {
+export async function extractFrameAt(
+  videoPath: string,
+  timestamp: number
+): Promise<{ jpegBuf: Buffer; width: number; height: number } | null> {
+  const tempDir = path.join(process.cwd(), 'storage', 'temp', `grid_frame_${Date.now()}`);
+  fs.mkdirSync(tempDir, { recursive: true });
+  const outputPath = path.join(tempDir, 'frame.jpg');
+
   try {
-    const topH = Math.max(1, Math.floor(frame.height * TOP_RATIO));
-    // Use sharp to crop top region and resize to TARGET_WIDTH wide
-    const { data, info } = await sharp(frame.jpegBuf)
-      .extract({ left: 0, top: 0, width: frame.width, height: topH })
-      .resize(TARGET_WIDTH, null, { withoutEnlargement: true })
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const cmd = `ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 2 -y "${outputPath}"`;
+    await execAsync(cmd, { timeout: 30000 });
 
-    const result = new Float32Array(data.length);
-    for (let i = 0; i < data.length; i++) {
-      result[i] = data[i] / 255.0;
+    if (fs.existsSync(outputPath)) {
+      const jpegBuf = fs.readFileSync(outputPath);
+      const meta = await sharp(jpegBuf).metadata();
+      return {
+        jpegBuf,
+        width: meta.width || 480,
+        height: meta.height || 270,
+      };
     }
-    return result;
-  } catch {
     return null;
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 }
 
-/**
- * Compute mean absolute difference between two top-region arrays.
- */
-function calcDiff(a: Float32Array | null, b: Float32Array | null): number {
-  if (!a || !b) return 1.0;
-  const len = Math.min(a.length, b.length);
-  if (len <= 0) return 1.0;
-  let sum = 0;
-  for (let i = 0; i < len; i++) {
-    sum += Math.abs(a[i] - b[i]);
-  }
-  return sum / len;
-}
+export const MAX_GRID_COLS = 16;
+export const MAX_GRID_ROWS = 16;
+export const MAX_GRID_CELLS = MAX_GRID_COLS * MAX_GRID_ROWS; // 256
 
 /**
- * Select keyframe indices where visual diff crosses threshold.
- * Uses top-region processing for scene change detection.
+ * Use FFmpeg scene detection to get scene boundary timestamps.
+ * If > maxScenes, increase threshold and retry.
+ * Returns array of timestamps for keyframes (scene starts).
  */
-async function pickSceneKeyframes(
-  frames: ExtractedFrame[],
-  diffThreshold: number = 0.15
+export async function getSceneTimestamps(
+  videoPath: string,
+  maxScenes: number = MAX_GRID_CELLS,
 ): Promise<number[]> {
-  const selected: number[] = [];
-  let lastArr: Float32Array | null = null;
+  let threshold = 0.3;
+  const MAX_THRESHOLD = 0.5;
 
-  for (let i = 0; i < frames.length; i++) {
-    const arr = await processFrameTopRegion(frames[i]);
-    if (!arr) continue;
+  while (true) {
+    const boundaries = await detectSceneChanges(videoPath, threshold);
+    const numScenes = boundaries.length - 1; // boundaries includes 0 and duration
 
-    if (lastArr === null) {
-      selected.push(i);
-      lastArr = arr;
-    } else {
-      const diff = calcDiff(lastArr, arr);
-      if (diff >= diffThreshold) {
-        selected.push(i);
-        lastArr = arr;
-      }
+    console.log(`Scene detection: threshold=${threshold.toFixed(2)} → ${numScenes} scenes (boundaries=${boundaries.length})`);
+
+    if (numScenes <= maxScenes) {
+      // Return scene start timestamps (excluding the final duration boundary)
+      return boundaries.slice(0, -1);
     }
-  }
 
-  return selected;
+    if (threshold >= MAX_THRESHOLD) {
+      console.warn(`Scene detection: ${numScenes} scenes > ${maxScenes} even at threshold=${threshold}, truncating`);
+      // Uniformly sample maxScenes boundaries
+      const step = boundaries.length / maxScenes;
+      const sampled: number[] = [];
+      for (let i = 0; i < maxScenes; i++) {
+        sampled.push(boundaries[Math.floor(i * step)]);
+      }
+      return sampled;
+    }
+
+    threshold = Math.min(MAX_THRESHOLD, threshold + 0.05);
+    console.log(`Scene detection: too many scenes (${numScenes} > ${maxScenes}), retrying with threshold=${threshold.toFixed(2)}`);
+  }
 }
 
 /**
  * Calculate grid columns, rows, and cell size.
  * Grid ratio is inverted from video aspect ratio.
+ * Grid is capped at MAX_GRID_COLS × MAX_GRID_ROWS to ensure VL model can process it.
  */
 function calculateGridLayout(
   videoWidth: number,
@@ -165,16 +102,28 @@ function calculateGridLayout(
   const videoRatio = videoWidth / videoHeight || 1.0;
   const gridRatio = videoHeight / videoWidth || 1.0; // inverted
 
+  // Clamp numImages to max grid capacity
+  const effectiveNumImages = Math.min(numImages, MAX_GRID_CELLS);
+
   let cols: number, rows: number;
   if (gridRatio >= 1.0) {
-    cols = Math.max(1, Math.round(Math.sqrt(numImages * gridRatio)));
-    rows = Math.max(1, Math.ceil(numImages / cols));
+    cols = Math.max(1, Math.round(Math.sqrt(effectiveNumImages * gridRatio)));
+    rows = Math.max(1, Math.ceil(effectiveNumImages / cols));
   } else {
-    rows = Math.max(1, Math.round(Math.sqrt(numImages / gridRatio)));
-    cols = Math.max(1, Math.ceil(numImages / rows));
+    rows = Math.max(1, Math.round(Math.sqrt(effectiveNumImages / gridRatio)));
+    cols = Math.max(1, Math.ceil(effectiveNumImages / rows));
   }
 
-  while (cols * rows < numImages) {
+  while (cols * rows < effectiveNumImages) {
+    if (gridRatio >= 1.0) cols++;
+    else rows++;
+  }
+
+  // Ensure grid never exceeds the max dimensions
+  cols = Math.min(cols, MAX_GRID_COLS);
+  rows = Math.min(rows, MAX_GRID_ROWS);
+  // Re-check capacity after clamping
+  while (cols * rows < effectiveNumImages && cols < MAX_GRID_COLS && rows < MAX_GRID_ROWS) {
     if (gridRatio >= 1.0) cols++;
     else rows++;
   }
@@ -201,7 +150,7 @@ function calculateGridLayout(
  * Add timestamp text to a sharp pipeline image.
  * We draw the timestamp using a simple overlay approach.
  */
-async function addTimestampToBuffer(
+export async function addTimestampToBuffer(
   imgBuf: Buffer,
   timestamp: number,
   width: number,
@@ -210,12 +159,14 @@ async function addTimestampToBuffer(
   const totalSecs = Math.floor(timestamp);
   const mins = Math.floor(totalSecs / 60);
   const secs = totalSecs % 60;
-  const text = `${mins}:${secs.toString().padStart(2, '0')}`;
+  const frac = timestamp - Math.floor(timestamp);
+  const fracStr = frac.toFixed(6).slice(1); // ".512875"
+  const text = `${mins}:${secs.toString().padStart(2, '0')}${fracStr}`;
 
   // Create a small SVG overlay with the timestamp
   const fontSize = Math.max(12, Math.floor(width / 25));
   const padding = Math.max(3, Math.floor(width / 80));
-  const textWidth = text.length * fontSize * 0.6;
+  const textWidth = text.length * fontSize * 0.55;
   const textHeight = fontSize * 1.3;
 
   const bgX = padding;
@@ -236,21 +187,16 @@ async function addTimestampToBuffer(
 
 /**
  * Generate a multi-frame grid screenshot from a video clip.
+ * Uses FFmpeg scene detection to pick keyframes.
  * Returns the output file path.
  */
 export async function generateVideoGrid(
   videoPath: string,
   options: {
-    fps?: number;
-    diffThreshold?: number;
     maxGridSize?: number;
   } = {}
 ): Promise<string> {
-  const {
-    fps = 2.0,
-    diffThreshold = 0.15,
-    maxGridSize = 2000,
-  } = options;
+  const { maxGridSize = 2000 } = options;
 
   if (!fs.existsSync(videoPath)) {
     throw new Error(`Video file not found: ${videoPath}`);
@@ -258,24 +204,30 @@ export async function generateVideoGrid(
 
   // Get video info
   const { width: videoWidth, height: videoHeight } = await getVideoResolution(videoPath);
-  console.log(`Grid: video ${videoWidth}x${videoHeight}, fps=${fps}, threshold=${diffThreshold}`);
+  console.log(`Grid: video ${videoWidth}x${videoHeight}`);
 
-  // Extract frames
-  const frames = await extractFrames(videoPath, fps);
+  // Use FFmpeg scene detection to get keyframe timestamps
+  const timestamps = await getSceneTimestamps(videoPath);
+  console.log(`Grid: detected ${timestamps.length} scene keyframes`);
+
+  if (timestamps.length === 0) {
+    throw new Error('No scene keyframes detected from video');
+  }
+
+  // Extract frames at detected timestamps
+  const frames: Array<{ jpegBuf: Buffer; width: number; height: number; timestamp: number }> = [];
+  for (const ts of timestamps) {
+    const frame = await extractFrameAt(videoPath, ts);
+    if (frame) {
+      frames.push({ ...frame, timestamp: ts });
+    }
+  }
+
   if (frames.length === 0) {
-    throw new Error('No frames extracted from video');
-  }
-  console.log(`Grid: extracted ${frames.length} frames`);
-
-  // Select keyframes
-  let selIndices = await pickSceneKeyframes(frames, diffThreshold);
-  console.log(`Grid: selected ${selIndices.length} keyframes`);
-
-  if (selIndices.length === 0) {
-    selIndices = [0];
+    throw new Error('Failed to extract any frames for grid');
   }
 
-  const numImages = selIndices.length;
+  const numImages = frames.length;
   const { cols, rows, cellSize } = calculateGridLayout(videoWidth, videoHeight, numImages, maxGridSize);
   const [cellW, cellH] = cellSize;
   console.log(`Grid: layout ${cols}x${rows}, cell ${cellW}x${cellH}`);
@@ -284,11 +236,10 @@ export async function generateVideoGrid(
   const gridW = cols * cellW + (cols + 1); // 1px grid lines
   const gridH = rows * cellH + (rows + 1);
 
-  // Start with black canvas
   const composites: sharp.OverlayOptions[] = [];
 
   for (let i = 0; i < numImages; i++) {
-    const frame = frames[selIndices[i]];
+    const frame = frames[i];
     const r = Math.floor(i / cols);
     const c = i % cols;
     const x = c * cellW + (c + 1);
@@ -300,7 +251,6 @@ export async function generateVideoGrid(
       .jpeg({ quality: 90 })
       .toBuffer();
 
-    // Add timestamp
     resizedBuf = await addTimestampToBuffer(resizedBuf, frame.timestamp, cellW, cellH);
 
     composites.push({
@@ -338,7 +288,6 @@ export async function generateVideoGrid(
     gridImage = gridImage.composite(batch);
   }
 
-  // Resize if exceeds maxGridSize
   const finalImage = gridImage.jpeg({ quality: 90 });
 
   // Save output
@@ -364,12 +313,10 @@ export async function generateThumbnailFromGrid(
   videoPath: string,
   thumbnailOutputPath: string,
   options: {
-    fps?: number;
-    diffThreshold?: number;
     maxGridSize?: number;
   } = {}
 ): Promise<{ gridPath: string; thumbnailPath: string }> {
-  const { fps = 2.0, diffThreshold = 0.15, maxGridSize = 2000 } = options;
+  const { maxGridSize = 2000 } = options;
 
   if (!fs.existsSync(videoPath)) {
     throw new Error(`Video file not found: ${videoPath}`);
@@ -378,24 +325,28 @@ export async function generateThumbnailFromGrid(
   // Get video info
   const { width: videoWidth, height: videoHeight } = await getVideoResolution(videoPath);
 
-  // Extract frames
-  const frames = await extractFrames(videoPath, fps);
+  // Use FFmpeg scene detection to get keyframe timestamps
+  const timestamps = await getSceneTimestamps(videoPath);
+
+  // Extract frames at detected timestamps
+  const frames: Array<{ jpegBuf: Buffer; width: number; height: number; timestamp: number }> = [];
+  for (const ts of timestamps) {
+    const frame = await extractFrameAt(videoPath, ts);
+    if (frame) {
+      frames.push({ ...frame, timestamp: ts });
+    }
+  }
+
   if (frames.length === 0) {
     throw new Error('No frames extracted from video');
   }
 
-  // Select keyframes
-  let selIndices = await pickSceneKeyframes(frames, diffThreshold);
-  if (selIndices.length === 0) {
-    selIndices = [0];
-  }
-
-  const numImages = selIndices.length;
+  const numImages = frames.length;
   const { cols, rows, cellSize } = calculateGridLayout(videoWidth, videoHeight, numImages, maxGridSize);
   const [cellW, cellH] = cellSize;
 
   // --- Save the first keyframe as 1:1 thumbnail ---
-  const firstFrame = frames[selIndices[0]];
+  const firstFrame = frames[0];
   const thumbSize = Math.min(cellW, cellH); // 1:1 square
   const outputDir = path.dirname(thumbnailOutputPath);
   if (!fs.existsSync(outputDir)) {
@@ -415,7 +366,7 @@ export async function generateThumbnailFromGrid(
   const composites: sharp.OverlayOptions[] = [];
 
   for (let i = 0; i < numImages; i++) {
-    const frame = frames[selIndices[i]];
+    const frame = frames[i];
     const r = Math.floor(i / cols);
     const c = i % cols;
     const x = c * cellW + (c + 1);

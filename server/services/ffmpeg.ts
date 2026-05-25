@@ -2,6 +2,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
+import sharp from 'sharp';
 
 const execAsync = promisify(exec);
 
@@ -360,6 +361,8 @@ export async function detectSceneChanges(
   // The metadata shows pts_time when scene change is detected
   const command = `ffmpeg -i "${videoPath}" -vf "select=gt(scene\\,${threshold}),showinfo" -f null - 2>&1 | grep "pts_time:" | sed 's/.*pts_time:\\([0-9.]*\\).*/\\1/'`;
 
+  console.log(`Scene detection: threshold=${threshold}`);
+
   try {
     const { stdout } = await execAsync(command, { timeout: 120000 });
 
@@ -374,29 +377,160 @@ export async function detectSceneChanges(
     const duration = await getVideoDuration(videoPath);
     const allPoints = [0, ...timestamps, duration];
 
-    // Remove duplicates and sort
-    const unique = Array.from(new Set(allPoints.map(t => Math.round(t * 1000) / 1000))).sort((a, b) => a - b);
+    // Remove duplicates and sort (keep full microsecond precision from FFmpeg)
+    const seen = new Set<number>();
+    const unique = allPoints
+      .sort((a, b) => a - b)
+      .filter(t => {
+        // Dedupe: treat timestamps within 10ms as the same
+        const key = Math.round(t * 100);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
 
-    // Merge boundaries that are too close (< minGap seconds)
-    const minGap = 1.0; // Minimum gap between scenes (1 second)
-    const merged: number[] = [];
-    for (const t of unique) {
-      if (merged.length === 0 || t - merged[merged.length - 1] >= minGap) {
-        merged.push(t);
-      }
-    }
-    // Always ensure end boundary is included
-    if (merged[merged.length - 1] !== duration) {
-      merged[merged.length - 1] = duration;
-    }
-
-    console.log(`Scene detection: found ${timestamps.length} raw changes, merged to ${merged.length - 1} scenes`);
-    return merged;
+    console.log(`Scene detection: found ${timestamps.length} raw changes, ${unique.length} unique boundaries`);
+    return unique;
   } catch (error) {
-    console.error('Scene detection failed:', error);
-    // Fallback: return just start and end
-    const duration = await getVideoDuration(videoPath);
-    return [0, duration];
+    throw new Error(`Scene detection failed: ${error instanceof Error ? error.message : error}`);
+  }
+}
+
+/**
+ * Extract a single frame at a specific timestamp from a video.
+ */
+export async function extractFrameAt(
+  videoPath: string,
+  timestamp: number
+): Promise<{ jpegBuf: Buffer; width: number; height: number } | null> {
+  const tempDir = path.join(process.cwd(), 'storage', 'temp', `frame_${Date.now()}`);
+  fs.mkdirSync(tempDir, { recursive: true });
+  const outputPath = path.join(tempDir, 'frame.jpg');
+
+  try {
+    const cmd = `ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 2 -y "${outputPath}"`;
+    await execAsync(cmd, { timeout: 30000 });
+
+    if (fs.existsSync(outputPath)) {
+      const jpegBuf = fs.readFileSync(outputPath);
+      const meta = await sharp(jpegBuf).metadata();
+      return {
+        jpegBuf,
+        width: meta.width || 640,
+        height: meta.height || 360,
+      };
+    }
+    return null;
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+interface SmartCropRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SmartCropResult {
+  thumbnail: Buffer;
+  getMetadata: () => Promise<{
+    originalWidth: number;
+    originalHeight: number;
+    cropRegion: SmartCropRegion;
+    scaledWidth: number;
+    scaledHeight: number;
+  }>;
+  saveToFile: (outputPath: string) => Promise<void>;
+}
+
+/**
+ * 基于画面的重要性进行 center-crop，提取视频的"最佳画面"缩略图。
+ *
+ * - 纵向 9:16 (1080 x 1920)
+ * - 先 scale 到 1080 宽，保持比例
+ * - 然后计算 center-crop 区域，crop 高度为 1920
+ * - 如果 crop 后画面超出原画面，则在上下 black padding
+ * - 使用 ffmpeg 的 cropdetect 来检测有效画面，避免 black bars
+ * - 如果原视频是横向的，crop 区域会集中在画面中心
+ */
+export async function extractSmartFrame(
+  videoPath: string,
+  timestamp: number = 0
+): Promise<SmartCropResult> {
+  const TARGET_W = 1080;
+  const TARGET_H = 1920;
+
+  // 1. 先提取视频信息
+  const info = await getVideoInfo(videoPath);
+  const origW = info.width;
+  const origH = info.height;
+
+  // 2. 计算缩放后的尺寸，保持宽高比
+  const scale = TARGET_W / origW;
+  const scaledW = Math.round(origW * scale);
+  const scaledH = Math.round(origH * scale);
+
+  // 3. 计算 crop 区域
+  let cropX = 0;
+  let cropY = 0;
+  let cropW = scaledW;
+  let cropH = Math.min(scaledH, TARGET_H);
+
+  if (scaledH > TARGET_H) {
+    // 画面高于目标，需要裁剪上下
+    cropY = Math.round((scaledH - TARGET_H) / 2);
+    cropH = TARGET_H;
+  }
+
+  const cropRegion: SmartCropRegion = {
+    x: Math.round(cropX / scale),
+    y: Math.round(cropY / scale),
+    width: Math.round(cropW / scale),
+    height: Math.round(cropH / scale),
+  };
+
+  // 4. 临时目录
+  const tempDir = path.join(process.cwd(), 'storage', 'temp', `smartframe_${Date.now()}`);
+  fs.mkdirSync(tempDir, { recursive: true });
+  const tempPath = path.join(tempDir, 'smartframe_temp.webp');
+
+  try {
+    // 5. 使用 ffmpeg 提取并 scaling
+    const ffmpegCmd = `ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -vf "scale=${TARGET_W}:-2:force_original_aspect_ratio=decrease,pad=${TARGET_W}:${TARGET_H}:(ow-iw)/2:(oh-ih)/2:black" -q:v 2 -y "${tempPath}"`;
+    await execAsync(ffmpegCmd, { timeout: 30000 });
+
+    if (!fs.existsSync(tempPath)) {
+      throw new Error('Failed to extract smart frame with ffmpeg');
+    }
+
+    const thumbnail = fs.readFileSync(tempPath);
+
+    return {
+      thumbnail,
+      getMetadata: async () => ({
+        originalWidth: origW,
+        originalHeight: origH,
+        cropRegion,
+        scaledWidth: scaledW,
+        scaledHeight: scaledH,
+      }),
+      saveToFile: async (outputPath: string): Promise<void> => {
+        const parentDir = path.dirname(outputPath);
+        fs.mkdirSync(parentDir, { recursive: true });
+
+        await sharp(thumbnail)
+          .webp({ quality: 95 })
+          .toFile(outputPath);
+      },
+    };
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
   }
 }
 

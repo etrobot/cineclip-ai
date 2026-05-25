@@ -192,6 +192,25 @@ export async function deleteClip(clipUrl: string, thumbnailUrl?: string): Promis
   return response.json();
 }
 
+/**
+ * Clear all gallery data (DB records + local files)
+ */
+export async function clearGallery(): Promise<{ success: boolean; deletedFiles: number }> {
+  const response = await fetch(`${API_BASE_URL}/api/gallery/clear`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to clear gallery');
+  }
+
+  return response.json();
+}
+
 export interface GridResponse {
   gridUrl: string;
 }
@@ -321,9 +340,16 @@ export interface ShotInfo {
   start: number;
   end: number;
   label: string;
+  category: string;
   clipUrl: string;
   thumbnailUrl: string;
   duration: string;
+}
+
+export interface SegmentShotsResult {
+  shots: ShotInfo[];
+  gridUrl: string;
+  jobId: string;
 }
 
 /**
@@ -334,7 +360,7 @@ export async function segmentShots(
   clipId: string,
   subtitles?: Array<{ start: number; end: number; text: string }>,
   jobId?: string
-): Promise<{ shots: ShotInfo[]; jobId: string }> {
+): Promise<SegmentShotsResult> {
   const response = await fetch(`${API_BASE_URL}/api/shots`, {
     method: 'POST',
     headers: {
@@ -366,6 +392,55 @@ export async function listShots(clipId: string): Promise<{ shots: Array<{ idx: n
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to list shots');
+  }
+  return response.json();
+}
+
+/**
+ * Shot search result types
+ */
+export interface ShotSearchShot {
+  id: number;
+  idx: number;
+  label: string | null;
+  category: string | null;
+  start: number | null;
+  end: number | null;
+  duration: string | null;
+  clipUrl: string | null;
+  thumbnailUrl: string | null;
+  size: number | null;
+}
+
+export interface ShotSearchClip {
+  fileName: string | null;
+  clipUrl: string | null;
+  thumbnailUrl: string | null;
+  title: string | null;
+  startTime: number | null;
+  endTime: number | null;
+  duration: string | null;
+}
+
+export interface ShotSearchGroup {
+  sourceClipId: string;
+  clip: ShotSearchClip;
+  shots: ShotSearchShot[];
+}
+
+export interface ShotSearchResponse {
+  query: string;
+  results: ShotSearchGroup[];
+}
+
+/**
+ * Search shots by label or category keyword
+ */
+export async function searchShots(query: string): Promise<ShotSearchResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/shots/search?q=${encodeURIComponent(query)}`);
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to search shots');
   }
   return response.json();
 }

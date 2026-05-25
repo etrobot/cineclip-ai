@@ -7,6 +7,7 @@ import { extractClip, detectSceneChanges } from './ffmpeg';
 import type { SubtitleSegment } from './youtube';
 import { buildVideoContextBlock, formatTime } from './llmPrompt';
 import type { VideoContext } from './llmPrompt';
+import { extractFrameAt, getSceneTimestamps, addTimestampToBuffer, MAX_GRID_CELLS, MAX_GRID_COLS, MAX_GRID_ROWS } from './grid';
 
 const execAsync = promisify(exec);
 
@@ -17,6 +18,7 @@ export interface ShotSegment {
   start: number;
   end: number;
   label: string;
+  category: string;
 }
 
 /**
@@ -79,7 +81,7 @@ async function callVLModel(
       model: cfg.model,
       messages: modelMessages,
       temperature: 0.35,
-      max_tokens: 4096,
+      max_tokens: 8192,
     }),
   });
 
@@ -89,11 +91,11 @@ async function callVLModel(
     throw new Error(`VL API error: ${response.status} ${response.statusText} - ${responseText}`);
   }
 
-  try {
-    return JSON.parse(responseText);
-  } catch (err: any) {
+  const result = (() => { try { return { ok: true as const, value: JSON.parse(responseText) }; } catch { return { ok: false as const }; } })();
+  if (!result.ok) {
     throw new Error(`VL API returned invalid JSON: ${responseText.slice(0, 200)}`);
   }
+  return result.value;
 }
 
 /**
@@ -107,7 +109,7 @@ function extractAssistantText(response: any): string {
 }
 
 /**
- * Parse JSON from response, handling code blocks
+ * Parse JSON from response, handling code blocks and truncated output.
  */
 function parseJsonFromText(content: string): unknown {
   let s = content.trim();
@@ -116,105 +118,59 @@ function parseJsonFromText(content: string): unknown {
     s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/m, '');
   }
   // Try direct parse first
-  try {
-    return JSON.parse(s);
-  } catch {
-    // Fallback: extract first JSON object from text
-    const start = s.indexOf('{');
-    const end = s.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(s.slice(start, end + 1));
-      } catch {
-        // Try to find and parse the shots array specifically
-        const shotsStart = s.indexOf('"shots"');
-        if (shotsStart >= 0) {
-          const arrStart = s.indexOf('[', shotsStart);
-          const arrEnd = s.lastIndexOf(']');
-          if (arrStart >= 0 && arrEnd > arrStart) {
-            try {
-              return { shots: JSON.parse(s.slice(arrStart, arrEnd + 1)) };
-            } catch {}
+  const directError = (() => { try { return { ok: true, value: JSON.parse(s) as unknown }; } catch (e) { return { ok: false, error: e }; } })();
+  if (directError.ok) return directError.value;
+
+  // Extract first JSON object from text
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    const objError = (() => { try { return { ok: true, value: JSON.parse(s.slice(start, end + 1)) as unknown }; } catch (e) { return { ok: false, error: e }; } })();
+    if (objError.ok) return objError.value;
+  }
+
+  // Recover complete segments from truncated JSON
+  const segmentsStart = s.indexOf('"segments"');
+  if (segmentsStart >= 0) {
+    const arrStart = s.indexOf('[', segmentsStart);
+    if (arrStart >= 0) {
+      const arrContent = s.slice(arrStart + 1);
+      const recovered: any[] = [];
+      let depth = 0;
+      let objStart = -1;
+      for (let i = 0; i < arrContent.length; i++) {
+        if (arrContent[i] === '{') {
+          if (depth === 0) objStart = i;
+          depth++;
+        } else if (arrContent[i] === '}') {
+          depth--;
+          if (depth === 0 && objStart >= 0) {
+            const objStr = arrContent.slice(objStart, i + 1);
+            const objResult = (() => { try { return { ok: true, value: JSON.parse(objStr) }; } catch { return { ok: false }; } })();
+            if (objResult.ok) recovered.push(objResult.value);
+            objStart = -1;
           }
         }
       }
+      if (recovered.length > 0) {
+        console.warn(`Recovered ${recovered.length} segments from truncated VL response`);
+        return { segments: recovered };
+      }
     }
-    throw new Error(`Failed to parse JSON from VL response: ${s.slice(0, 300)}`);
   }
+
+  throw new Error(`Failed to parse JSON from VL response: ${s.slice(0, 300)}`);
 }
 
 /**
- * Extract a single frame at a specific timestamp from a video.
+ * Add timestamp label to a frame buffer (no scene number).
  */
-async function extractFrameAt(
-  clipPath: string,
-  timestamp: number
-): Promise<{ jpegBuf: Buffer; width: number; height: number } | null> {
-  const tempDir = path.join(process.cwd(), 'storage', 'temp', `frame_${Date.now()}`);
-  fs.mkdirSync(tempDir, { recursive: true });
-  const outputPath = path.join(tempDir, 'frame.jpg');
-
-  try {
-    const cmd = `ffmpeg -i "${clipPath}" -ss ${timestamp} -vframes 1 -q:v 2 -y "${outputPath}"`;
-    await execAsync(cmd, { timeout: 30000 });
-
-    if (fs.existsSync(outputPath)) {
-      const jpegBuf = fs.readFileSync(outputPath);
-      const meta = await sharp(jpegBuf).metadata();
-      return {
-        jpegBuf,
-        width: meta.width || 640,
-        height: meta.height || 360,
-      };
-    }
-    return null;
-  } finally {
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    } catch {}
-  }
-}
+// addTimestampToBuffer, extractFrameAt, getSceneTimestamps, MAX_GRID_CELLS are imported from ./grid
 
 /**
- * Add scene number label to a frame buffer.
- */
-async function addSceneNumberToBuffer(
-  imgBuf: Buffer,
-  sceneNum: number,
-  timestamp: number,
-  width: number,
-  height: number
-): Promise<Buffer> {
-  const totalSecs = Math.floor(timestamp);
-  const mins = Math.floor(totalSecs / 60);
-  const secs = totalSecs % 60;
-  const timeStr = `${mins}:${secs.toString().padStart(2, '0')}`;
-  const text = `#${sceneNum} ${timeStr}`;
-
-  const fontSize = Math.max(14, Math.floor(width / 20));
-  const padding = Math.max(4, Math.floor(width / 60));
-  const textWidth = text.length * fontSize * 0.6;
-  const textHeight = fontSize * 1.4;
-
-  const bgX = padding;
-  const bgY = padding;
-  const bgW = textWidth + padding * 2;
-  const bgH = textHeight + padding * 2;
-
-  const svg = Buffer.from(`<svg width="${width}" height="${height}">
-    <rect x="${bgX}" y="${bgY}" width="${bgW}" height="${bgH}" fill="black" opacity="0.75" rx="3"/>
-    <text x="${bgX + padding}" y="${bgY + padding + fontSize}" fill="#FFFF00" font-family="monospace" font-size="${fontSize}" font-weight="bold">${text}</text>
-  </svg>`);
-
-  return sharp(imgBuf)
-    .composite([{ input: svg, blend: 'over' }])
-    .jpeg({ quality: 90 })
-    .toBuffer();
-}
-
-/**
- * Build a numbered grid image from scene keyframes.
+ * Build a timestamped grid image from scene keyframes.
  * Returns the grid as a Buffer.
+ * Grid is capped at MAX_GRID_COLS × MAX_GRID_ROWS to ensure VL model can process it.
  */
 async function buildSceneGrid(
   frames: Array<{ jpegBuf: Buffer; width: number; height: number; timestamp: number }>,
@@ -222,7 +178,7 @@ async function buildSceneGrid(
   videoHeight: number,
   maxGridSize: number = 2000
 ): Promise<Buffer> {
-  const numImages = frames.length;
+  const numImages = Math.min(frames.length, MAX_GRID_CELLS);
   const videoRatio = videoWidth / videoHeight || 1.0;
   const gridRatio = videoHeight / videoWidth || 1.0;
 
@@ -236,6 +192,14 @@ async function buildSceneGrid(
     cols = Math.max(1, Math.ceil(numImages / rows));
   }
   while (cols * rows < numImages) {
+    if (gridRatio >= 1.0) cols++;
+    else rows++;
+  }
+
+  // Enforce max grid dimensions
+  cols = Math.min(cols, MAX_GRID_COLS);
+  rows = Math.min(rows, MAX_GRID_ROWS);
+  while (cols * rows < numImages && cols < MAX_GRID_COLS && rows < MAX_GRID_ROWS) {
     if (gridRatio >= 1.0) cols++;
     else rows++;
   }
@@ -266,13 +230,13 @@ async function buildSceneGrid(
     const x = c * cellW + (c + 1);
     const y = r * cellH + (r + 1);
 
-    // Resize and add scene number
+    // Resize and add timestamp
     let resizedBuf = await sharp(frame.jpegBuf)
       .resize(cellW, cellH, { fit: 'fill' })
       .jpeg({ quality: 90 })
       .toBuffer();
 
-    resizedBuf = await addSceneNumberToBuffer(resizedBuf, i + 1, frame.timestamp, cellW, cellH);
+    resizedBuf = await addTimestampToBuffer(resizedBuf, frame.timestamp, cellW, cellH);
 
     composites.push({ input: resizedBuf, left: x, top: y });
   }
@@ -307,59 +271,77 @@ async function buildSceneGrid(
   return gridImage.jpeg({ quality: 90 }).toBuffer();
 }
 
+// extractFrameAt and getSceneTimestamps are imported from ./grid
+
 /**
- * Call VL model to classify all scenes from a grid image.
- * Returns array of labels.
+ * Snap a timestamp to the nearest boundary from scene detection.
+ * Tolerates small rounding errors from VL model output.
  */
-async function classifyScenesFromGrid(
+function snapToBoundary(t: number, boundaries: number[]): number {
+  let closest = boundaries[0];
+  let minDist = Math.abs(t - closest);
+  for (const b of boundaries) {
+    const dist = Math.abs(t - b);
+    if (dist < minDist) {
+      minDist = dist;
+      closest = b;
+    }
+  }
+  // Only snap if within 0.5s of a boundary; otherwise keep original
+  if (minDist < 0.5) return closest;
+  return t;
+}
+
+/**
+ * Call VL model to analyze grid and suggest shot groupings.
+ * Returns array of {startIdx, endIdx, label} describing which grid cells belong together.
+ */
+async function analyzeGridSegments(
   gridBuf: Buffer,
   numScenes: number,
   boundaries: number[],
   subtitles: ClipSubtitle[],
   clipDuration: number,
   videoCtx?: VideoContext
-): Promise<string[]> {
+): Promise<Array<{ start: number; end: number; label: string; category: string }>> {
   const cfg = vlEnv();
   if (!cfg.apiKey) {
-    console.warn('OPENAI_API_KEY not configured, using default labels');
-    return Array.from({ length: numScenes }, (_, i) => `Shot ${i + 1}`);
+    throw new Error('OPENAI_API_KEY not configured for VL model');
   }
 
-  // Build scene list text
+  // Build scene list text with timestamps
+  const boundaryTimestamps = boundaries.map(b => b.toFixed(6));
   const sceneList = boundaries.slice(0, -1).map((start, i) => {
     const end = boundaries[i + 1];
-    return `场景 ${i + 1}: ${start.toFixed(3)}s - ${end.toFixed(3)}s`;
+    return `${start.toFixed(6)} - ${end.toFixed(6)}`;
   }).join('\n');
 
   // Build subtitle text
   const subtitleLines = subtitles.map((s, i) =>
-    `#${i + 1} [${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
+    `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
   ).join('\n');
 
-  // Build user prompt
-  let userText = `以下是一张 grid 图，包含从视频 clip 中提取的所有场景关键帧，每个格子左上角标有编号和时间。\n\n`;
-  userText += `clip 时长：${clipDuration.toFixed(1)} 秒\n\n`;
-  userText += `场景列表（FFmpeg 检测到的精确边界）：\n${sceneList}\n\n`;
+  let userText = `时长：${clipDuration.toFixed(6)}s\n\n`;
+  userText += `可选时间点：${boundaryTimestamps.join(', ')}\n\n`;
+  userText += `帧区间：\n${sceneList}\n\n`;
   if (subtitleLines) {
-    userText += `clip 内字幕：\n${subtitleLines}\n\n`;
+    userText += `字幕：\n${subtitleLines}\n\n`;
   }
-  userText += `请为每个场景生成标签，按编号顺序输出 JSON：{"labels":["标签1","标签2",...]}`;
-
-  // Add video context if available
   if (videoCtx) {
     const contextBlock = buildVideoContextBlock(videoCtx);
-    userText = `${contextBlock}\n\n${userText}`;
+    userText += `${contextBlock}\n\n`;
   }
 
-  const systemContent = `你是专业的视频分镜分析师。根据提供的 grid 图（包含编号场景关键帧）、字幕和视频主题，为每个场景给出简短的描述标签。
+  const systemContent = `根据帧合集提取分镜。画面相似的连续帧合并为一段，画面明显不同才分段。每段至少2-3帧，不要每帧一段。只输出JSON。
 
-【输出格式】
-只输出 JSON：{"labels":["标签1","标签2",...]}
+输出格式：{"segments":[{"start":"0.000000","end":"5.512875","label":"火箭组装","category":"纪录"},{"start":"5.512875","end":"13.512875","label":"电子产线","category":"纪录"},{"start":"13.512875","end":"32.956203","label":"发射场景","category":"纪录"}]}
 
-【规则】
-- 每个标签对应 grid 中的一个编号场景，按编号顺序输出
-- 标签应简短描述该场景的核心内容，如：工厂航拍、火箭发射、机器人操作、焊接特写
-- 标签应结合视频整体主题，禁止空洞词汇如"视频片段"、"精彩瞬间"`;
+category 分类（每段必须选一个）：讲座、标题、图表、纪录、卡通、访谈、新闻、演示、动画、片头、片尾、过渡、广告、音乐、其他
+
+规则：
+- start 和 end 只能从"可选时间点"中选取，精确到6位小数
+- 连续覆盖整个 clip，前段end等于下段start，首段start=0，末段end=时长
+- label 用具体内容命名，禁止用"描述""片段"等空洞词`;
 
   const messages = [
     { role: 'system', content: systemContent },
@@ -375,43 +357,73 @@ async function classifyScenesFromGrid(
     },
   ];
 
-  console.log(`Calling VL model to classify ${numScenes} scenes from grid...`);
+  console.log(`Calling VL model to analyze grid segments (${numScenes} frames)...`);
   const response = await callVLModel(messages);
   const content = extractAssistantText(response);
 
   if (!content) {
-    console.warn('No content in VL response, using default labels');
-    return Array.from({ length: numScenes }, (_, i) => `Shot ${i + 1}`);
+    throw new Error('VL model returned empty response');
   }
 
-  console.log('VL classification response:', content);
+  console.log('VL segment analysis response:', content);
 
-  // Parse labels
-  try {
-    const parsed = parseJsonFromText(content);
-    if (parsed && Array.isArray((parsed as any).labels)) {
-      const labels = (parsed as any).labels;
-      while (labels.length < numScenes) {
-        labels.push(`Shot ${labels.length + 1}`);
-      }
-      return labels.slice(0, numScenes);
+  // Parse segments (now timestamp-based)
+  const parsed = parseJsonFromText(content);
+  if (parsed && Array.isArray((parsed as any).segments)) {
+    const raw = (parsed as any).segments
+      .map((s: any) => ({
+        start: typeof s.start === 'number' ? s.start : parseFloat(s.start),
+        end: typeof s.end === 'number' ? s.end : parseFloat(s.end),
+        label: s.label || `Segment`,
+        category: s.category || '其他',
+      }))
+      .filter((s: any) => !isNaN(s.start) && !isNaN(s.end) && s.end > s.start);
+
+    // Snap start/end to nearest boundary from scene detection
+    for (const seg of raw) {
+      seg.start = snapToBoundary(seg.start, boundaries);
+      seg.end = snapToBoundary(seg.end, boundaries);
     }
-  } catch (err) {
-    console.warn('Failed to parse VL labels:', err);
+
+    // Merge adjacent segments with the same (or very similar) label
+    const merged: Array<{ start: number; end: number; label: string; category: string }> = [];
+    for (const seg of raw) {
+      if (merged.length === 0) {
+        merged.push({ ...seg });
+        continue;
+      }
+      const last = merged[merged.length - 1];
+      const lastLabel = last.label.trim().toLowerCase();
+      const curLabel = seg.label.trim().toLowerCase();
+      const lastCategory = last.category.trim().toLowerCase();
+      const curCategory = seg.category.trim().toLowerCase();
+      if ((lastLabel === curLabel || lastLabel.includes(curLabel) || curLabel.includes(lastLabel)) && lastCategory === curCategory) {
+        last.end = seg.end;
+      } else {
+        merged.push({ ...seg });
+      }
+    }
+
+    return merged;
   }
 
-  return Array.from({ length: numScenes }, (_, i) => `Shot ${i + 1}`);
+  throw new Error('VL response did not contain valid segments');
 }
 
 /**
- * Extract shot segments from a clip using FFmpeg scene detection + VL grid classification.
+ * Extract shot segments from a clip using FFmpeg scene detection + VL grid segmentation.
  * Returns array of ShotSegment with start/end relative to clip.
  */
+export interface AnalyzeShotsResult {
+  shots: ShotSegment[];
+  gridBuf: Buffer;
+}
+
 export async function analyzeShots(
   clipPath: string,
   subtitles?: ClipSubtitle[],
   videoCtx?: VideoContext
-): Promise<ShotSegment[]> {
+): Promise<AnalyzeShotsResult> {
   console.log(`Analyzing shots for clip: ${clipPath}`);
 
   // Get clip duration and resolution
@@ -430,41 +442,37 @@ export async function analyzeShots(
 
   console.log(`Clip: ${clipDuration.toFixed(3)}s, ${videoWidth}x${videoHeight}`);
 
-  // Step 1: Detect scene changes with FFmpeg (precise to frame level)
+  // Step 1: Use FFmpeg scene detection to get keyframe timestamps
   console.log('Detecting scene changes with FFmpeg...');
-  const boundaries = await detectSceneChanges(clipPath, 0.3);
-  console.log(`Scene boundaries: ${boundaries.map(b => b.toFixed(3)).join(', ')}`);
+  const timestamps = await getSceneTimestamps(clipPath, MAX_GRID_CELLS);
+  console.log(`Detected ${timestamps.length} scene keyframes`);
 
-  if (boundaries.length <= 2) {
-    return [{ start: 0, end: clipDuration, label: 'Full clip' }];
+  if (timestamps.length === 0) {
+    throw new Error('No scene keyframes detected from video');
   }
 
-  // Step 2: Extract keyframes at scene midpoints
-  console.log('Extracting keyframes at scene midpoints...');
+  // Step 2: Extract frames at detected timestamps
   const keyFrames: Array<{ jpegBuf: Buffer; width: number; height: number; timestamp: number }> = [];
-  for (let i = 0; i < boundaries.length - 1; i++) {
-    const start = boundaries[i];
-    const end = boundaries[i + 1];
-    const mid = (start + end) / 2;
-
-    const frame = await extractFrameAt(clipPath, mid);
+  for (const ts of timestamps) {
+    const frame = await extractFrameAt(clipPath, ts);
     if (frame) {
-      keyFrames.push({ ...frame, timestamp: mid });
+      keyFrames.push({ ...frame, timestamp: ts });
     }
   }
-  console.log(`Extracted ${keyFrames.length} keyframes`);
 
-  if (keyFrames.length === 0) {
-    return [{ start: 0, end: clipDuration, label: 'Full clip' }];
-  }
+  // Build boundaries from keyframe timestamps (for VL reference)
+  // Each keyframe represents a scene starting at its timestamp
+  // End of last scene is clip duration
+  const boundaries: number[] = keyFrames.map(f => f.timestamp);
+  boundaries.push(clipDuration);
 
-  // Step 3: Build numbered grid image
-  console.log('Building numbered grid image...');
+  // Step 3: Build timestamped grid image
+  console.log('Building timestamped grid image...');
   const gridBuf = await buildSceneGrid(keyFrames, videoWidth || 1920, videoHeight || 1080);
   console.log(`Grid image: ${gridBuf.length} bytes`);
 
-  // Step 4: Use VL model to classify all scenes from grid (single call)
-  const labels = await classifyScenesFromGrid(
+  // Step 4: Use VL model to suggest segment groupings from grid
+  const segments = await analyzeGridSegments(
     gridBuf,
     keyFrames.length,
     boundaries,
@@ -473,29 +481,29 @@ export async function analyzeShots(
     videoCtx
   );
 
-  // Step 5: Build ShotSegment array from boundaries + labels
+  // Step 5: Build ShotSegment array from VL suggestions (now timestamp-based)
   const shots: ShotSegment[] = [];
-  for (let i = 0; i < boundaries.length - 1; i++) {
-    const start = boundaries[i];
-    const end = boundaries[i + 1];
-    const label = labels[i] || `Shot ${i + 1}`;
+  for (const seg of segments) {
+    const start = seg.start;
+    const end = seg.end;
 
-    // Skip shots that are too short (< 0.5s)
-    if (end - start < 0.5) {
-      console.warn(`Skipping shot too short: ${start.toFixed(3)} - ${end.toFixed(3)}`);
+    // Skip shots that are too short (< 1.0s)
+    if (end - start < 1.0) {
+      console.warn(`Skipping shot too short: ${start.toFixed(3)} - ${end.toFixed(3)}s`);
       continue;
     }
 
     shots.push({
-      start: Math.round(start * 1000) / 1000,
-      end: Math.round(end * 1000) / 1000,
-      label,
+      start,
+      end,
+      label: seg.label,
+      category: seg.category,
     });
   }
 
   console.log(`Detected ${shots.length} shots:`, shots.map(s => `${s.start.toFixed(3)}-${s.end.toFixed(3)}s: ${s.label}`).join(', '));
 
-  return shots;
+  return { shots, gridBuf };
 }
 
 /**
@@ -532,17 +540,13 @@ export async function cutShots(
       startSec: shot.start,
       endSec: shot.end,
       outputPath,
-      codec: 'copy',
+      codec: 'reencode',
     });
 
     // Generate thumbnail at midpoint
     const midTime = (shot.start + shot.end) / 2;
     const thumbCmd = `ffmpeg -i "${clipPath}" -ss ${midTime} -vframes 1 -q:v 2 -y "${thumbPath}"`;
-    try {
-      await execAsync(thumbCmd);
-    } catch (err) {
-      console.warn(`Failed to generate thumbnail for shot ${i}:`, err);
-    }
+    await execAsync(thumbCmd);
 
     results.push({
       path: outputPath,
@@ -560,32 +564,50 @@ export async function cutShots(
 
 /**
  * Full pipeline: analyze shots + cut them from clip.
- * Returns array of shot info with URLs.
+ * Returns array of shot info with URLs, plus the grid image URL.
  */
 export async function segmentShots(
   clipPath: string,
   clipId: string,
   subtitles?: ClipSubtitle[],
   videoCtx?: VideoContext
-): Promise<Array<{ start: number; end: number; label: string; clipUrl: string; thumbnailUrl: string; duration: string }>> {
+): Promise<{ shots: Array<{ start: number; end: number; label: string; category: string; clipUrl: string; thumbnailUrl: string; duration: string }>; gridUrl: string }> {
   // Analyze shots
-  const shots = await analyzeShots(clipPath, subtitles, videoCtx);
+  const { shots, gridBuf } = await analyzeShots(clipPath, subtitles, videoCtx);
+
+  // Save grid image to file
+  let gridUrl = '';
+  if (gridBuf.length > 0) {
+    const shotsDir = path.join(process.cwd(), 'clips', 'shots');
+    if (!fs.existsSync(shotsDir)) {
+      fs.mkdirSync(shotsDir, { recursive: true });
+    }
+    const gridFileName = `${clipId}_grid.jpg`;
+    const gridPath = path.join(shotsDir, gridFileName);
+    fs.writeFileSync(gridPath, gridBuf);
+    gridUrl = `/api/clips/shots/${gridFileName}`;
+    console.log(`Grid image saved: ${gridPath}`);
+  }
 
   // Cut shots
   const cutResults = await cutShots(clipPath, shots, clipId);
 
   // Format result
-  return cutResults.map(r => {
-    const durSec = r.segment.end - r.segment.start;
-    const mins = Math.floor(durSec / 60);
-    const secs = Math.floor(durSec % 60);
-    return {
-      start: r.segment.start,
-      end: r.segment.end,
-      label: r.segment.label,
-      clipUrl: r.clipUrl,
-      thumbnailUrl: r.thumbnailUrl,
-      duration: `${mins}:${secs.toString().padStart(2, '0')}`,
-    };
-  });
+  return {
+    shots: cutResults.map(r => {
+      const durSec = r.segment.end - r.segment.start;
+      const mins = Math.floor(durSec / 60);
+      const secs = Math.floor(durSec % 60);
+      return {
+        start: r.segment.start,
+        end: r.segment.end,
+        label: r.segment.label,
+        category: r.segment.category,
+        clipUrl: r.clipUrl,
+        thumbnailUrl: r.thumbnailUrl,
+        duration: `${mins}:${secs.toString().padStart(2, '0')}`,
+      };
+    }),
+    gridUrl,
+  };
 }

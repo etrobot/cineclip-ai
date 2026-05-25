@@ -30,7 +30,7 @@ async function main() {
 
   const startTime = performance.now();
   try {
-    const shots = await analyzeShots(videoPath);
+    const { shots } = await analyzeShots(videoPath);
     const duration = performance.now() - startTime;
 
     console.log(`\n✅ 分析完成，耗时: ${(duration / 1000).toFixed(2)}s`);

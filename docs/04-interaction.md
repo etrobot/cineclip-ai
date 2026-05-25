@@ -52,6 +52,13 @@
 - **Library**: tsparticles with slim preset
 - **Effect**: Subtle floating particles with red/purple tones
 
+### ShotSearch (`src/components/ShotSearch.tsx`)
+- **Purpose**: Search shots by label or category keyword
+- **Key elements**: Search icon button in navbar, fullscreen modal overlay with search input
+- **Interaction**: Click search icon → modal opens → type keyword → Enter/search → results grouped by clip
+- **Result display**: Each group shows clip info (thumbnail, title, time range) + matching shots (mini thumbnail, label, category badge, time range)
+- **Categories displayed**: Category badge (e.g. 讲座, 纪录, 访谈) in uppercase with zinc styling
+
 ## User Paths
 
 ### Path 1: Analyze & Clip (Primary Flow)
@@ -85,12 +92,21 @@
    - `subtitles` (full subtitles with absolute timestamps)
    - `videoTitle`, `videoDescription` (from analyze response)
 3. Server uses FFmpeg to detect scene boundaries in the clip
-4. Server extracts one midpoint keyframe per scene and builds a numbered grid image
-5. VL model labels each scene using the grid + clip subtitles + full video context
-6. Server cuts each shot via FFmpeg → `clips/shots/`
-7. UI displays nested shot cards under the parent clip
+4. Server extracts keyframes at scene starts and builds a grid image with yellow timestamp overlays
+5. VL model labels and categorizes each scene using the grid + clip subtitles + full video context
+6. Server cuts each shot via FFmpeg (reencode for frame accuracy) → `clips/shots/`
+7. UI displays nested shot cards under the parent clip, each showing label, category badge, and time range
 
-### Path 5: Delete Clip
+### Path 5: Shot Search
+1. User clicks search icon in the navbar (results view)
+2. Search modal opens with text input (auto-focused)
+3. User types keyword and presses Enter or clicks Search
+4. App calls `GET /api/shots/search?q=keyword`
+5. Results are grouped by source clip — each group shows clip thumbnail, title, and time range
+6. Matching shots within each group display: mini thumbnail, label, category badge, time range
+7. User clicks X to close the modal
+
+### Path 6: Delete Clip
 1. User clicks trash icon on a clip card
 2. App calls `POST /api/delete` with clip and thumbnail URLs
 3. Server deletes files from filesystem
