@@ -3,11 +3,11 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
-import { extractClip, detectSceneChanges } from './ffmpeg';
+import { extractClip } from './ffmpeg';
 import type { SubtitleSegment } from './youtube';
 import { buildVideoContextBlock, formatTime } from './llmPrompt';
 import type { VideoContext } from './llmPrompt';
-import { extractFrameAt, getSceneTimestamps, addTimestampToBuffer, MAX_GRID_CELLS, MAX_GRID_COLS, MAX_GRID_ROWS } from './grid';
+import { extractFrameAt, getSceneTimestamps, addSceneIndexToBuffer, MAX_GRID_CELLS, MAX_GRID_COLS, MAX_GRID_ROWS } from './grid';
 
 const execAsync = promisify(exec);
 
@@ -29,6 +29,15 @@ interface SamplingFrame {
   width: number;
   height: number;
   timestamp: number;
+  sceneIndex: number;
+}
+
+interface SceneBoundary {
+  index: number;
+  start: number;
+  end: number;
+  startUs: number;
+  endUs: number;
 }
 
 /**
@@ -163,17 +172,12 @@ function parseJsonFromText(content: string): unknown {
 }
 
 /**
- * Add timestamp label to a frame buffer (no scene number).
- */
-// addTimestampToBuffer, extractFrameAt, getSceneTimestamps, MAX_GRID_CELLS are imported from ./grid
-
-/**
- * Build a timestamped grid image from scene keyframes.
+ * Build a scene-indexed grid image from scene keyframes.
  * Returns the grid as a Buffer.
  * Grid is capped at MAX_GRID_COLS × MAX_GRID_ROWS to ensure VL model can process it.
  */
 async function buildSceneGrid(
-  frames: Array<{ jpegBuf: Buffer; width: number; height: number; timestamp: number }>,
+  frames: SamplingFrame[],
   videoWidth: number,
   videoHeight: number,
   maxGridSize: number = 2000
@@ -230,13 +234,13 @@ async function buildSceneGrid(
     const x = c * cellW + (c + 1);
     const y = r * cellH + (r + 1);
 
-    // Resize and add timestamp
+    // Resize and add scene index
     let resizedBuf = await sharp(frame.jpegBuf)
       .resize(cellW, cellH, { fit: 'fill' })
       .jpeg({ quality: 90 })
       .toBuffer();
 
-    resizedBuf = await addTimestampToBuffer(resizedBuf, frame.timestamp, cellW, cellH);
+    resizedBuf = await addSceneIndexToBuffer(resizedBuf, frame.sceneIndex, cellW, cellH);
 
     composites.push({ input: resizedBuf, left: x, top: y });
   }
@@ -274,47 +278,26 @@ async function buildSceneGrid(
 // extractFrameAt and getSceneTimestamps are imported from ./grid
 
 /**
- * Snap a timestamp to the nearest boundary from scene detection.
- * Tolerates small rounding errors from VL model output.
- */
-function snapToBoundary(t: number, boundaries: number[]): number {
-  let closest = boundaries[0];
-  let minDist = Math.abs(t - closest);
-  for (const b of boundaries) {
-    const dist = Math.abs(t - b);
-    if (dist < minDist) {
-      minDist = dist;
-      closest = b;
-    }
-  }
-  // Only snap if within 0.5s of a boundary; otherwise keep original
-  if (minDist < 0.5) return closest;
-  return t;
-}
-
-/**
  * Call VL model to analyze grid and suggest shot groupings.
- * Returns array of {startIdx, endIdx, label} describing which grid cells belong together.
+ * Returns array of scene-index ranges describing which grid cells belong together.
  */
 async function analyzeGridSegments(
   gridBuf: Buffer,
-  numScenes: number,
-  boundaries: number[],
+  scenes: SceneBoundary[],
   subtitles: ClipSubtitle[],
   clipDuration: number,
   videoCtx?: VideoContext
-): Promise<Array<{ start: number; end: number; label: string; category: string }>> {
+): Promise<Array<{ startScene: number; endScene: number; label: string; category: string }>> {
   const cfg = vlEnv();
   if (!cfg.apiKey) {
     throw new Error('OPENAI_API_KEY not configured for VL model');
   }
 
-  // Build scene list text with timestamps
-  const boundaryTimestamps = boundaries.map(b => b.toFixed(6));
-  const sceneList = boundaries.slice(0, -1).map((start, i) => {
-    const end = boundaries[i + 1];
-    return `${start.toFixed(6)} - ${end.toFixed(6)}`;
-  }).join('\n');
+  const numScenes = scenes.length;
+  const sceneIndexList = scenes.map(scene => `#${scene.index}`).join(', ');
+  const sceneList = scenes.map(scene =>
+    `#${scene.index} [${scene.start.toFixed(6)}-${scene.end.toFixed(6)}]`
+  ).join('\n');
 
   // Build subtitle text
   const subtitleLines = subtitles.map((s, i) =>
@@ -322,8 +305,8 @@ async function analyzeGridSegments(
   ).join('\n');
 
   let userText = `时长：${clipDuration.toFixed(6)}s\n\n`;
-  userText += `可选时间点：${boundaryTimestamps.join(', ')}\n\n`;
-  userText += `帧区间：\n${sceneList}\n\n`;
+  userText += `可选 scene 序号：${sceneIndexList}\n\n`;
+  userText += `scene 列表：\n${sceneList}\n\n`;
   if (subtitleLines) {
     userText += `字幕：\n${subtitleLines}\n\n`;
   }
@@ -332,15 +315,18 @@ async function analyzeGridSegments(
     userText += `${contextBlock}\n\n`;
   }
 
-  const systemContent = `根据帧合集提取分镜。画面相似的连续帧合并为一段，画面明显不同才分段。每段至少2-3帧，不要每帧一段。只输出JSON。
+  const systemContent = `根据帧合集提取分镜。每张图左下角黄色标记是 scene 序号，不是时间。画面相似的连续 scene 合并为一段，画面明显不同才分段。只输出JSON。
 
-输出格式：{"segments":[{"start":"0.000000","end":"5.512875","label":"火箭组装","category":"纪录"},{"start":"5.512875","end":"13.512875","label":"电子产线","category":"纪录"},{"start":"13.512875","end":"32.956203","label":"发射场景","category":"纪录"}]}
+输出格式：{"segments":[{"startScene":1,"endScene":3,"label":"火箭组装","category":"纪录"},{"startScene":4,"endScene":6,"label":"电子产线","category":"纪录"},{"startScene":7,"endScene":10,"label":"发射场景","category":"纪录"}]}
 
 category 分类（每段必须选一个）：讲座、标题、图表、纪录、卡通、访谈、新闻、演示、动画、片头、片尾、过渡、广告、音乐、其他
 
 规则：
-- start 和 end 只能从"可选时间点"中选取，精确到6位小数
-- 连续覆盖整个 clip，前段end等于下段start，首段start=0，末段end=时长
+- startScene 和 endScene 只能从提供的 scene 序号中选取，必须是整数
+- startScene / endScene 表示闭区间，前后段必须连续覆盖全部 scene
+- 首段 startScene=1，末段 endScene=${numScenes}
+- 前一段 endScene + 1 = 下一段 startScene
+- 不允许跳号、不允许重叠、不允许遗漏任何 scene
 - label 用具体内容命名，禁止用"描述""片段"等空洞词`;
 
   const messages = [
@@ -357,7 +343,7 @@ category 分类（每段必须选一个）：讲座、标题、图表、纪录�
     },
   ];
 
-  console.log(`Calling VL model to analyze grid segments (${numScenes} frames)...`);
+  console.log(`Calling VL model to analyze grid segments (${numScenes} scenes)...`);
   const response = await callVLModel(messages);
   const content = extractAssistantText(response);
 
@@ -367,26 +353,42 @@ category 分类（每段必须选一个）：讲座、标题、图表、纪录�
 
   console.log('VL segment analysis response:', content);
 
-  // Parse segments (now timestamp-based)
   const parsed = parseJsonFromText(content);
   if (parsed && Array.isArray((parsed as any).segments)) {
-    const raw = (parsed as any).segments
+    const raw: Array<{ startScene: number; endScene: number; label: string; category: string }> = (parsed as any).segments
       .map((s: any) => ({
-        start: typeof s.start === 'number' ? s.start : parseFloat(s.start),
-        end: typeof s.end === 'number' ? s.end : parseFloat(s.end),
+        startScene: typeof s.startScene === 'number' ? s.startScene : parseInt(String(s.startScene), 10),
+        endScene: typeof s.endScene === 'number' ? s.endScene : parseInt(String(s.endScene), 10),
         label: s.label || `Segment`,
         category: s.category || '其他',
       }))
-      .filter((s: any) => !isNaN(s.start) && !isNaN(s.end) && s.end > s.start);
+      .filter((s: { startScene: number; endScene: number; label: string; category: string }) =>
+        Number.isInteger(s.startScene) &&
+        Number.isInteger(s.endScene) &&
+        s.startScene >= 1 &&
+        s.endScene >= s.startScene &&
+        s.endScene <= numScenes
+      );
 
-    // Snap start/end to nearest boundary from scene detection
+    if (raw.length === 0) {
+      throw new Error('VL response did not contain any valid scene-index segments');
+    }
+
+    raw.sort((a, b) => a.startScene - b.startScene);
+
+    let expectedStart = 1;
     for (const seg of raw) {
-      seg.start = snapToBoundary(seg.start, boundaries);
-      seg.end = snapToBoundary(seg.end, boundaries);
+      if (seg.startScene !== expectedStart) {
+        throw new Error(`VL scene coverage is invalid: expected startScene=${expectedStart}, got ${seg.startScene}`);
+      }
+      expectedStart = seg.endScene + 1;
+    }
+    if (expectedStart !== numScenes + 1) {
+      throw new Error(`VL scene coverage is incomplete: expected final endScene=${numScenes}`);
     }
 
     // Merge adjacent segments with the same (or very similar) label
-    const merged: Array<{ start: number; end: number; label: string; category: string }> = [];
+    const merged: Array<{ startScene: number; endScene: number; label: string; category: string }> = [];
     for (const seg of raw) {
       if (merged.length === 0) {
         merged.push({ ...seg });
@@ -398,7 +400,7 @@ category 分类（每段必须选一个）：讲座、标题、图表、纪录�
       const lastCategory = last.category.trim().toLowerCase();
       const curCategory = seg.category.trim().toLowerCase();
       if ((lastLabel === curLabel || lastLabel.includes(curLabel) || curLabel.includes(lastLabel)) && lastCategory === curCategory) {
-        last.end = seg.end;
+        last.endScene = seg.endScene;
       } else {
         merged.push({ ...seg });
       }
@@ -452,40 +454,57 @@ export async function analyzeShots(
   }
 
   // Step 2: Extract frames at detected timestamps
-  const keyFrames: Array<{ jpegBuf: Buffer; width: number; height: number; timestamp: number }> = [];
-  for (const ts of timestamps) {
+  const keyFrames: SamplingFrame[] = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    const ts = timestamps[i];
     const frame = await extractFrameAt(clipPath, ts);
     if (frame) {
-      keyFrames.push({ ...frame, timestamp: ts });
+      keyFrames.push({ ...frame, timestamp: ts, sceneIndex: i + 1 });
     }
   }
 
-  // Build boundaries from keyframe timestamps (for VL reference)
-  // Each keyframe represents a scene starting at its timestamp
-  // End of last scene is clip duration
-  const boundaries: number[] = keyFrames.map(f => f.timestamp);
-  boundaries.push(clipDuration);
+  if (keyFrames.length !== timestamps.length) {
+    throw new Error(`Failed to extract all scene frames: expected ${timestamps.length}, got ${keyFrames.length}`);
+  }
 
-  // Step 3: Build timestamped grid image
-  console.log('Building timestamped grid image...');
+  const boundaries: number[] = [...timestamps, clipDuration];
+  const scenes: SceneBoundary[] = keyFrames.map((frame, i) => {
+    const start = frame.timestamp;
+    const end = boundaries[i + 1];
+    return {
+      index: frame.sceneIndex,
+      start,
+      end,
+      startUs: Math.round(start * 1_000_000),
+      endUs: Math.round(end * 1_000_000),
+    };
+  });
+
+  // Step 3: Build scene-indexed grid image
+  console.log('Building scene-indexed grid image...');
   const gridBuf = await buildSceneGrid(keyFrames, videoWidth || 1920, videoHeight || 1080);
   console.log(`Grid image: ${gridBuf.length} bytes`);
 
   // Step 4: Use VL model to suggest segment groupings from grid
   const segments = await analyzeGridSegments(
     gridBuf,
-    keyFrames.length,
-    boundaries,
+    scenes,
     subtitles || [],
     clipDuration,
     videoCtx
   );
 
-  // Step 5: Build ShotSegment array from VL suggestions (now timestamp-based)
+  // Step 5: Build ShotSegment array from VL suggestions via scene-index → precise boundary mapping
   const shots: ShotSegment[] = [];
   for (const seg of segments) {
-    const start = seg.start;
-    const end = seg.end;
+    const startScene = scenes[seg.startScene - 1];
+    const endScene = scenes[seg.endScene - 1];
+    if (!startScene || !endScene) {
+      throw new Error(`Invalid scene range returned by VL: ${seg.startScene}-${seg.endScene}`);
+    }
+
+    const start = startScene.startUs / 1_000_000;
+    const end = endScene.endUs / 1_000_000;
 
     // Skip shots that are too short (< 1.0s)
     if (end - start < 1.0) {

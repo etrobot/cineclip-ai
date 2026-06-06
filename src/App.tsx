@@ -4,13 +4,16 @@ import LoadingModal from "./components/LoadingModal";
 import GlowBackground from "./components/GlowBackground";
 import { ClipRow } from "./components/ClipRow";
 import { motion, AnimatePresence } from "motion/react";
-import { LogOut, Plus, Trash2 } from "lucide-react";
+import { LogOut, Plus, Trash2, ListVideo } from "lucide-react";
 import { ShotSearch } from "./components/ShotSearch";
+import { ChannelBrowser } from "./components/ChannelBrowser";
+import { QueueView } from "./components/QueueView";
 import {
   analyzeVideo,
   subscribeProgress,
   generateJobId,
   deleteClip,
+  deleteVideoClips,
   clearGallery,
   listClips,
   renderClip,
@@ -18,8 +21,9 @@ import {
   type ProgressEvent,
   type SubtitleItem,
 } from "./api/client";
+import { useChannelQueue } from "./hooks/useChannelQueue";
 
-type AppView = "home" | "loading" | "results";
+type AppView = "home" | "loading" | "results" | "queue";
 
 type ClipStatus = "pending" | "rendering" | "done" | "error";
 
@@ -144,8 +148,45 @@ export default function App() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [serverClipsLoaded, setServerClipsLoaded] = useState(false);
+  const [showChannel, setShowChannel] = useState(false);
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const reloadGallery = useCallback(() => {
+    listClips()
+      .then((data) => {
+        if (data.clips.length > 0) {
+          const items: ClipItem[] = data.clips.map((c) => ({
+            id: c.id,
+            videoId: c.videoId,
+            title: c.title || c.id.replace(/_/g, " ").replace(/p/g, "."),
+            duration: c.duration,
+            thumbnail: c.thumbnailUrl || "",
+            start: c.start,
+            end: c.end,
+            status: "done",
+            progress: 100,
+            stage: "",
+            clipUrl: c.clipUrl,
+            renderedThumbnailUrl: c.thumbnailUrl,
+          }));
+          setAnalyzedClips(groupClipsByVideoFlat(items));
+        }
+      })
+      .catch(console.warn);
+  }, []);
+  const {
+    queueItems,
+    isFetching: isChannelFetching,
+    addVideosToQueue,
+    removeFromQueue,
+    confirmVideoDelete,
+    cancelVideoConfirm,
+    clearDone: clearDoneQueue,
+    clearQueue,
+    startFetch: startChannelFetch,
+    stopFetch: stopChannelFetch,
+  } = useChannelQueue(reloadGallery);
+  const queuedVideoIds = new Set(queueItems.map((item) => item.video.videoId));
 
   // Load existing clips from server on mount
   useEffect(() => {
@@ -428,6 +469,25 @@ export default function App() {
     []
   );
 
+  const handleDeleteVideoClips = useCallback(
+    async (videoId: string) => {
+      // Remove all clips for this video from state
+      setAnalyzedClips((prev) => {
+        const next = prev.filter((group) => group.videoId !== videoId);
+        console.log("[DeleteVideo] videoId:", videoId, "remaining groups:", next.length);
+        return next;
+      });
+
+      try {
+        await deleteVideoClips(videoId);
+        console.log("[DeleteVideo] server delete ok:", videoId);
+      } catch (err) {
+        console.error("[DeleteVideo] server delete failed:", videoId, err);
+      }
+    },
+    []
+  );
+
   const hasClips = analyzedClips.some((row) => row.items.length > 0);
 
   return (
@@ -443,7 +503,12 @@ export default function App() {
             exit={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.5 }}
           >
-            <Hero onSearch={startAnalysis} onGoToGallery={handleGoToGallery} />
+            <Hero
+              onSearch={startAnalysis}
+              onGoToGallery={handleGoToGallery}
+              onGoToQueue={() => setView("queue")}
+              onOpenChannel={() => setShowChannel(true)}
+            />
           </motion.div>
         )}
 
@@ -469,10 +534,23 @@ export default function App() {
                     <span className="text-white border-b-2 border-red-600 pb-1">
                       Gallery
                     </span>
+                    <button
+                      onClick={() => setView("queue")}
+                      className="hover:text-white transition-colors"
+                    >
+                      Queue
+                    </button>
                   </div>
                 </div>
                 <div className="flex items-center gap-4">
                   <ShotSearch />
+                  <button
+                    onClick={() => setView("queue")}
+                    className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-white"
+                    title="Open queue"
+                  >
+                    <ListVideo className="w-5 h-5" />
+                  </button>
                   <button
                     onClick={() => setView("home")}
                     className="p-2 hover:bg-zinc-800 rounded-full transition-colors text-white"
@@ -510,8 +588,10 @@ export default function App() {
           videoThumbnail={row.thumbnail}
           clips={row.items}
           onDeleteClip={handleDeleteClip}
+          onDeleteVideo={handleDeleteVideoClips}
           onRetryClip={handleRetryClip}
           subtitles={row.items[0]?.subtitles}
+          videoId={row.videoId}
         />
                     </div>
                   ) : null
@@ -529,6 +609,21 @@ export default function App() {
             </div>
           </motion.div>
         )}
+
+        {view === "queue" && (
+          <QueueView
+            items={queueItems}
+            isFetching={isChannelFetching}
+            onBack={() => setView(hasClips ? "results" : "home")}
+            onStart={startChannelFetch}
+            onStop={stopChannelFetch}
+            onRemove={removeFromQueue}
+            onConfirmDelete={confirmVideoDelete}
+            onCancelConfirm={cancelVideoConfirm}
+            onClearDone={clearDoneQueue}
+            onClearQueue={clearQueue}
+          />
+        )}
       </AnimatePresence>
 
       <LoadingModal
@@ -536,6 +631,16 @@ export default function App() {
         status={error || currentStage}
         progress={progress}
       />
+
+      <AnimatePresence>
+        {showChannel && (
+          <ChannelBrowser
+            onClose={() => setShowChannel(false)}
+            queuedVideoIds={queuedVideoIds}
+            onAddToQueue={addVideosToQueue}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }

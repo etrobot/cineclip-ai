@@ -161,6 +161,27 @@ Re-query gallery state from database.
 
 **Response**: `GalleryResponse`
 
+### GET /api/clips/list
+List all clips from SQLite database.
+
+**Response**: `{ clips: ListClipItem[], groups: { videoId, clips }[] }`
+
+### GET /api/clips/exists/:videoId
+Check whether clips already exist for a given videoId (platformId in the author table).
+
+**Response**: `{ exists: boolean, clipCount: number }`
+
+- Returns `exists: true` if the author has at least one clip in the database
+- Used by the channel queue to detect previously extracted videos and prompt the user to confirm deletion before re-extracting
+
+### POST /api/delete/video/:videoId
+Delete ALL clips, shots, and associated records for a given video.
+
+**Response**: `{ success: boolean, deletedFiles: string[], deletedClipCount: number }`
+
+- Cascading delete: shots → clips → original_posts → author
+- Also deletes filesystem files: clip videos, thumbnails, shot videos, shot thumbnails, grid images
+
 ### GET /health
 Health check endpoint.
 
@@ -195,6 +216,7 @@ Subscribe to job progress events.
 |--------|------|---------------|
 | API Client | `src/api/client.ts` | All HTTP + WebSocket communication |
 | App | `src/App.tsx` | Main view routing, state management, pipeline orchestration |
+| Channel Queue Hook | `src/hooks/useChannelQueue.ts` | Batch video queue with duplicate detection, confirm-delete flow, and sequential processing (analyze → render → segment) |
 | Render Queue Hook | `src/hooks/useRenderQueue.ts` | Queue-based clip rendering with progress tracking |
 | Persisted Clips Hook | `src/hooks/usePersistedClips.ts` | localStorage persistence for session restoration |
 

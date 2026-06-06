@@ -59,7 +59,8 @@ export async function getSceneTimestamps(
   maxScenes: number = MAX_GRID_CELLS,
 ): Promise<number[]> {
   let threshold = 0.3;
-  const MAX_THRESHOLD = 0.5;
+  const MAX_THRESHOLD = 0.95;
+  const THRESHOLD_STEP = 0.05;
 
   while (true) {
     const boundaries = await detectSceneChanges(videoPath, threshold);
@@ -73,17 +74,12 @@ export async function getSceneTimestamps(
     }
 
     if (threshold >= MAX_THRESHOLD) {
-      console.warn(`Scene detection: ${numScenes} scenes > ${maxScenes} even at threshold=${threshold}, truncating`);
-      // Uniformly sample maxScenes boundaries
-      const step = boundaries.length / maxScenes;
-      const sampled: number[] = [];
-      for (let i = 0; i < maxScenes; i++) {
-        sampled.push(boundaries[Math.floor(i * step)]);
-      }
-      return sampled;
+      throw new Error(
+        `Scene detection produced ${numScenes} scenes, exceeding max grid capacity ${maxScenes} even at threshold=${threshold.toFixed(2)}`
+      );
     }
 
-    threshold = Math.min(MAX_THRESHOLD, threshold + 0.05);
+    threshold = Math.min(MAX_THRESHOLD, threshold + THRESHOLD_STEP);
     console.log(`Scene detection: too many scenes (${numScenes} > ${maxScenes}), retrying with threshold=${threshold.toFixed(2)}`);
   }
 }
@@ -167,6 +163,37 @@ export async function addTimestampToBuffer(
   const fontSize = Math.max(12, Math.floor(width / 25));
   const padding = Math.max(3, Math.floor(width / 80));
   const textWidth = text.length * fontSize * 0.55;
+  const textHeight = fontSize * 1.3;
+
+  const bgX = padding;
+  const bgY = height - textHeight - padding * 2;
+  const bgW = textWidth + padding * 2;
+  const bgH = textHeight + padding * 2;
+
+  const svg = Buffer.from(`<svg width="${width}" height="${height}">
+    <rect x="${bgX}" y="${bgY}" width="${bgW}" height="${bgH}" fill="black" opacity="0.7" rx="2"/>
+    <text x="${bgX + padding}" y="${bgY + padding + fontSize}" fill="#FFFF00" font-family="monospace" font-size="${fontSize}" font-weight="bold">${text}</text>
+  </svg>`);
+
+  return sharp(imgBuf)
+    .composite([{ input: svg, blend: 'over' }])
+    .jpeg({ quality: 90 })
+    .toBuffer();
+}
+
+/**
+ * Add scene index text to a frame buffer.
+ */
+export async function addSceneIndexToBuffer(
+  imgBuf: Buffer,
+  sceneIndex: number,
+  width: number,
+  height: number
+): Promise<Buffer> {
+  const text = `#${sceneIndex}`;
+  const fontSize = Math.max(14, Math.floor(width / 18));
+  const padding = Math.max(4, Math.floor(width / 70));
+  const textWidth = text.length * fontSize * 0.7;
   const textHeight = fontSize * 1.3;
 
   const bgX = padding;

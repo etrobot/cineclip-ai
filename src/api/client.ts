@@ -193,6 +193,25 @@ export async function deleteClip(clipUrl: string, thumbnailUrl?: string): Promis
 }
 
 /**
+ * Delete all clips and shots for a given video (by videoId)
+ */
+export async function deleteVideoClips(videoId: string): Promise<{ success: boolean; deletedFiles: string[]; deletedClipCount: number }> {
+  const response = await fetch(`${API_BASE_URL}/api/delete/video/${encodeURIComponent(videoId)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to delete video clips');
+  }
+
+  return response.json();
+}
+
+/**
  * Clear all gallery data (DB records + local files)
  */
 export async function clearGallery(): Promise<{ success: boolean; deletedFiles: number }> {
@@ -321,6 +340,18 @@ export async function listClips(): Promise<ListClipsResponse> {
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to list clips');
+  }
+  return response.json();
+}
+
+/**
+ * Check if clips already exist for a given videoId
+ */
+export async function checkVideoExists(videoId: string): Promise<{ exists: boolean; clipCount: number }> {
+  const response = await fetch(`${API_BASE_URL}/api/clips/exists/${encodeURIComponent(videoId)}`);
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to check video existence');
   }
   return response.json();
 }
@@ -463,4 +494,33 @@ export async function getServerConfig(): Promise<ServerConfig> {
  */
 export function generateJobId(): string {
   return `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// ─── Channel / Playlist APIs ───────────────────────────────────────────
+
+export interface ChannelVideo {
+  videoId: string;
+  title: string;
+  duration: number | null;
+  thumbnail: string;
+  url: string;
+}
+
+export interface ChannelVideosResponse {
+  url: string;
+  type: 'channel' | 'playlist' | 'unknown';
+  videoCount: number;
+  videos: ChannelVideo[];
+}
+
+/**
+ * List all videos from a YouTube channel or playlist URL
+ */
+export async function listChannelVideos(url: string): Promise<ChannelVideosResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/channel/videos?url=${encodeURIComponent(url)}`);
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to list channel videos');
+  }
+  return response.json();
 }

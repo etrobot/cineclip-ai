@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw, Grid2x2 } from "lucide-react";
+import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw, Grid2x2, Trash2 as TrashVideo } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import { API_BASE_URL, segmentShots, listShots, getServerConfig, type ShotInfo, type SubtitleItem } from "../api/client";
 import type { ClipItem } from "../App";
@@ -370,12 +370,14 @@ interface ClipRowProps {
   videoTitle: string;
   videoThumbnail: string;
   clips: ClipItem[];
+  videoId: string;
   onDeleteClip?: (clipId: string) => void;
+  onDeleteVideo?: (videoId: string) => void;
   onRetryClip?: (clipId: string) => void;
   subtitles?: SubtitleItem[];
 }
 
-export function ClipRow({ videoTitle, videoThumbnail, clips, onDeleteClip, onRetryClip, subtitles }: ClipRowProps) {
+export function ClipRow({ videoTitle, videoThumbnail, clips, videoId, onDeleteClip, onDeleteVideo, onRetryClip, subtitles }: ClipRowProps) {
   return (
     <div className="mb-8">
       <div className="flex items-center gap-3 mb-4">
@@ -387,6 +389,15 @@ export function ClipRow({ videoTitle, videoThumbnail, clips, onDeleteClip, onRet
         <h2 className="text-lg font-bold text-white tracking-tight line-clamp-1">
           {videoTitle}
         </h2>
+        {onDeleteVideo && (
+          <button
+            onClick={() => onDeleteVideo(videoId)}
+            className="p-1.5 rounded-lg hover:bg-red-900/30 text-zinc-400 hover:text-red-500 transition-colors ml-auto"
+            title="Delete all clips for this video"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        )}
       </div>
       <div className="flex flex-col gap-2">
         {clips.map((clip, i) => (

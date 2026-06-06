@@ -3,10 +3,8 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import path from "path";
-import { fileURLToPath } from "url";
 import * as fs from "fs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = path.resolve(process.cwd(), "storage", "cineclip.db");
 
 // Ensure storage directory exists before opening database
@@ -21,7 +19,7 @@ sqlite.pragma("journal_mode = WAL");
 export const db = drizzle(sqlite, { schema });
 
 export function runMigrations() {
-  const migrationsFolder = path.resolve(__dirname, "..", "drizzle");
+  const migrationsFolder = path.resolve(process.cwd(), "server", "drizzle");
   migrate(db, { migrationsFolder });
 }
 

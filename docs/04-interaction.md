@@ -59,6 +59,24 @@
 - **Result display**: Each group shows clip info (thumbnail, title, time range) + matching shots (mini thumbnail, label, category badge, time range)
 - **Categories displayed**: Category badge (e.g. 讲座, 纪录, 访谈) in uppercase with zinc styling
 
+### ChannelBrowser (`src/components/ChannelBrowser.tsx`)
+- **Purpose**: Browse and select videos from a YouTube channel or playlist
+- **Key elements**: URL input, video list with checkboxes, add-to-queue button
+- **Interaction**: Enter channel/playlist URL → click "List" → select videos → click "Add to queue"
+- **Selection**: Toggle individual videos, or use "All"/"None" quick-select buttons
+- **Already-queued videos**: Displayed as checked and disabled (cannot be re-added)
+- **State persistence**: Channel URL, type, and video list saved to localStorage for session restore
+
+### QueueView (`src/components/QueueView.tsx`)
+- **Purpose**: Manage batch video extraction queue
+- **Key elements**: Batch progress bar, start/stop controls, per-video progress with status indicators
+- **Actions**: Start fetch, stop, remove individual video, clear done, clear entire queue
+- **Duplicate detection**: Videos with existing clips show an amber warning bar with Yes/No buttons
+  - "Yes" → confirms deletion of existing clips, video will re-extract (delete first)
+  - "No" → removes the video from the queue
+- **Status indicators**: idle, analyzing, rendering, segmenting, done, error
+- **Confirmed re-extract**: Shows amber progress bar with "Will re-extract" label
+
 ## User Paths
 
 ### Path 1: Analyze & Clip (Primary Flow)
@@ -113,17 +131,59 @@
 4. clips.json is updated
 5. UI removes the clip card with exit animation
 
+### Path 7: Channel Batch Queue
+1. User clicks channel icon on Hero page → ChannelBrowser modal opens
+2. User enters YouTube channel or playlist URL and clicks "List"
+3. Video list appears; user selects videos via checkboxes (or All/None)
+4. User clicks "Add N videos to queue"
+5. System checks each video against `GET /api/clips/exists/:videoId`:
+   - **New video**: Added with "Waiting..." status
+   - **Already extracted**: Added with amber "Already extracted (N clips). Delete & re-extract?" warning bar
+6. User navigates to Queue view
+7. For videos with the duplicate warning:
+   - Click **Yes** → existing clips will be deleted before re-extraction (status changes to "Will re-extract")
+   - Click **No** → video is removed from the queue
+8. User clicks "Start Fetch" → queue processes sequentially:
+   - For confirmed re-extract videos: calls `POST /api/delete/video/:videoId` first, then proceeds
+   - Per video: analyze → render clips → segment shots
+9. Progress shown per video with percentage and stage labels
+10. User can stop fetch at any time; completed videos remain in queue
+
+### Path 8: Delete All Video Clips
+1. User clicks delete icon on a video group in Gallery view
+2. App calls `POST /api/delete/video/:videoId`
+3. Server cascading deletes: shots → clips → original_posts → author records + all associated files
+4. UI removes the video group from gallery
+
 ## Frontend State Management
 
 ### App-level State (src/App.tsx)
 | State | Type | Purpose |
 |-------|------|---------|
-| `view` | `"home" \| "loading" \| "results"` | Current view |
+| `view` | `"home" \| "loading" \| "results" \| "queue"` | Current view |
 | `analyzedClips` | `VideoGroup[]` | Clip suggestions from LLM |
 | `videoData` | `{ videoId, title, thumbnail }` | Current video metadata |
 | `progress` | `number` | Current job progress (0-100) |
 | `status` | `string` | Current status message |
 | `error` | `string \| null` | Error message display |
+| `showChannel` | `boolean` | ChannelBrowser modal visibility |
+
+### Channel Queue (useChannelQueue hook)
+- Manages batch video queue with duplicate detection and sequential processing
+- Each queue item (`FetchItem`) tracks:
+  - `status`: `idle` → `analyzing` → `rendering` → `segmenting` → `done` / `error`
+  - `needsConfirm`: true if video already has extracted clips (awaiting user confirmation)
+  - `confirmDelete`: true if user confirmed deletion of existing clips
+  - `existingClipCount`: number of clips already in the database for this video
+- **Duplicate detection flow**:
+  1. On `addVideosToQueue()`, calls `checkVideoExists()` for each video
+  2. Videos with existing clips are marked `needsConfirm: true`
+  3. These videos show an amber warning bar with Yes/No buttons
+  4. `confirmVideoDelete()` → sets `confirmDelete: true`, clears `needsConfirm`
+  5. `cancelVideoConfirm()` → removes video from queue
+  6. `startFetch()` skips `needsConfirm` items (must confirm first)
+- **Processing flow**: When a `confirmDelete` video is processed, `deleteVideoClips()` is called first to clean up existing data
+- Queue state persisted to localStorage (`cineclip_channel_queue`)
 
 ### Render Queue (useRenderQueue hook)
 - Manages queue of clips to render sequentially

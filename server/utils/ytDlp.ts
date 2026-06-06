@@ -1,10 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { spawn } from 'child_process';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 export interface YtDlpRunResult {
   stdout: string;
@@ -18,7 +14,7 @@ function resolveYtDlpBin(): string {
   }
 
   // Resolve project root (works from both server/ and root)
-  const projectRoot = path.resolve(__dirname, '..', '..');
+  const projectRoot = process.cwd();
 
   // Try common locations (priority order)
   const commonPaths = [

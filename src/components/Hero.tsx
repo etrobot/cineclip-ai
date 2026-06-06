@@ -1,13 +1,15 @@
 import { motion } from "motion/react";
-import { Search, Youtube, TrendingUp, Star, Award, Grid } from "lucide-react";
+import { Search, Youtube, TrendingUp, Star, Award, Grid, Tv, ListVideo } from "lucide-react";
 import React, { useState } from "react";
 
 interface HeroProps {
   onSearch: (url: string) => void;
   onGoToGallery: () => void;
+  onGoToQueue: () => void;
+  onOpenChannel: () => void;
 }
 
-export default function Hero({ onSearch, onGoToGallery }: HeroProps) {
+export default function Hero({ onSearch, onGoToGallery, onGoToQueue, onOpenChannel }: HeroProps) {
   const [url, setUrl] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -17,8 +19,26 @@ export default function Hero({ onSearch, onGoToGallery }: HeroProps) {
 
   return (
     <div className="relative min-h-screen flex flex-col items-center justify-center px-4 overflow-hidden">
-      {/* Top Navigation for Gallery */}
-      <div className="absolute top-0 right-0 p-8 z-20">
+      {/* Top Navigation for Gallery & Channel */}
+      <div className="absolute top-0 right-0 p-8 z-20 flex items-center gap-3">
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={onOpenChannel}
+          className="flex items-center gap-2 px-6 py-3 bg-zinc-900/50 hover:bg-zinc-800/80 backdrop-blur-xl border border-white/5 rounded-full text-white font-bold tracking-widest text-xs uppercase"
+        >
+          <Tv className="w-4 h-4 text-red-600" />
+          <span>Channel</span>
+        </motion.button>
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={onGoToQueue}
+          className="flex items-center gap-2 px-6 py-3 bg-zinc-900/50 hover:bg-zinc-800/80 backdrop-blur-xl border border-white/5 rounded-full text-white font-bold tracking-widest text-xs uppercase"
+        >
+          <ListVideo className="w-4 h-4 text-red-600" />
+          <span>Queue</span>
+        </motion.button>
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
