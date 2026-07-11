@@ -20,8 +20,10 @@ import {
   type Clip,
   type ProgressEvent,
   type SubtitleItem,
+  type ListClipItem,
 } from "./api/client";
 import { useChannelQueue } from "./hooks/useChannelQueue";
+import { useShotQueue } from "./hooks/useShotQueue";
 
 type AppView = "home" | "loading" | "results" | "queue";
 
@@ -112,13 +114,31 @@ function groupClipsByVideoFlat(items: ClipItem[]): VideoGroup[] {
       grouped.set(item.videoId, {
         videoId: item.videoId,
         title: item.title,
-        thumbnail: item.thumbnail,
+        thumbnail: item.renderedThumbnailUrl || item.thumbnail,
         items: [],
       });
     }
     grouped.get(item.videoId)!.items.push(item);
   }
   return Array.from(grouped.values());
+}
+
+function mapListClipsToItems(clips: ListClipItem[]): ClipItem[] {
+  return clips.map((c) => ({
+    // Use fileName-based id so shots API can resolve sourceClipId (e.g. _y9v0xuz9lA_0_51)
+    id: c.fileName.replace(/\.mp4$/i, ""),
+    videoId: c.videoId,
+    title: c.title || c.fileName.replace(/\.mp4$/i, "").replace(/_/g, " "),
+    duration: c.duration,
+    thumbnail: c.thumbnailUrl || "",
+    start: c.start,
+    end: c.end,
+    status: "done" as const,
+    progress: 100,
+    stage: "",
+    clipUrl: c.clipUrl,
+    renderedThumbnailUrl: c.thumbnailUrl,
+  }));
 }
 
 function getStageLabel(stage: string, message: string): string {
@@ -152,27 +172,31 @@ export default function App() {
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const reloadGallery = useCallback(() => {
-    listClips()
+    console.log("[Gallery] reloading from server...");
+    return listClips()
       .then((data) => {
-        if (data.clips.length > 0) {
-          const items: ClipItem[] = data.clips.map((c) => ({
-            id: c.id,
-            videoId: c.videoId,
-            title: c.title || c.id.replace(/_/g, " ").replace(/p/g, "."),
-            duration: c.duration,
-            thumbnail: c.thumbnailUrl || "",
-            start: c.start,
-            end: c.end,
-            status: "done",
-            progress: 100,
-            stage: "",
-            clipUrl: c.clipUrl,
-            renderedThumbnailUrl: c.thumbnailUrl,
-          }));
-          setAnalyzedClips(groupClipsByVideoFlat(items));
-        }
+        console.log("[Gallery] server clips:", data.clips.length);
+        setAnalyzedClips((prev) => {
+          const serverItems = mapListClipsToItems(data.clips);
+          if (serverItems.length === 0) return prev;
+
+          const serverKeys = new Set(
+            serverItems.map((c) => `${c.videoId}:${c.start}:${c.end}`)
+          );
+          const pendingItems = prev.flatMap((g) =>
+            g.items.filter(
+              (item) =>
+                (item.status === "pending" || item.status === "rendering") &&
+                !serverKeys.has(`${item.videoId}:${item.start}:${item.end}`)
+            )
+          );
+
+          return groupClipsByVideoFlat([...serverItems, ...pendingItems]);
+        });
       })
-      .catch(console.warn);
+      .catch((err) => {
+        console.warn("[Gallery] reload failed:", err);
+      });
   }, []);
   const {
     queueItems,
@@ -188,40 +212,18 @@ export default function App() {
   } = useChannelQueue(reloadGallery);
   const queuedVideoIds = new Set(queueItems.map((item) => item.video.videoId));
 
+  // Shot detection queue — serial processing to avoid 429 from VL model API
+  const {
+    items: shotQueueItems,
+    enqueue: enqueueShot,
+    retry: retryShot,
+  } = useShotQueue();
+
   // Load existing clips from server on mount
   useEffect(() => {
     if (serverClipsLoaded) return;
-
-    listClips()
-      .then((data) => {
-        setServerClipsLoaded(true);
-        if (data.clips.length === 0) return;
-
-        const items: ClipItem[] = data.clips.map((c) => ({
-          id: c.id,
-          videoId: c.videoId,
-          title: c.title || c.id.replace(/_/g, " ").replace(/p/g, "."),
-          duration: c.duration,
-          thumbnail: c.thumbnailUrl || "",
-          start: c.start,
-          end: c.end,
-          status: "done",
-          progress: 100,
-          stage: "",
-          clipUrl: c.clipUrl,
-          renderedThumbnailUrl: c.thumbnailUrl,
-        }));
-
-        setAnalyzedClips((prev) => {
-          if (prev.length > 0) return prev;
-          return groupClipsByVideoFlat(items);
-        });
-      })
-      .catch((err) => {
-        console.warn("Failed to load existing clips from server:", err);
-        setServerClipsLoaded(true);
-      });
-  }, [serverClipsLoaded]);
+    reloadGallery().finally(() => setServerClipsLoaded(true));
+  }, [serverClipsLoaded, reloadGallery]);
 
   const updateClipItem = useCallback(
     (clipId: string, patch: Partial<ClipItem>) => {
@@ -313,8 +315,9 @@ export default function App() {
           // Continue with next clip — don't let one failure stop the queue
         }
       }
+      await reloadGallery();
     },
-    [renderOneClip]
+    [renderOneClip, reloadGallery]
   );
 
   const handleRetryClip = useCallback(
@@ -429,8 +432,8 @@ export default function App() {
   }, []);
 
   const handleGoToGallery = useCallback(() => {
-    setView("results");
-  }, []);
+    reloadGallery().finally(() => setView("results"));
+  }, [reloadGallery]);
 
   const handleDeleteClip = useCallback(
     async (clipId: string) => {
@@ -592,6 +595,9 @@ export default function App() {
           onRetryClip={handleRetryClip}
           subtitles={row.items[0]?.subtitles}
           videoId={row.videoId}
+          shotQueueItems={shotQueueItems}
+          onEnqueueShot={enqueueShot}
+          onRetryShot={retryShot}
         />
                     </div>
                   ) : null

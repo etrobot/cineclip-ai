@@ -23,7 +23,7 @@ testRoute.post('/subtitles', async (req, res) => {
 
     const videoData = await getVideoWithSubtitles(videoId);
     if (!videoData) {
-      return res.status(404).json({ error: 'Video not found or no subtitles available' });
+      return res.status(404).json({ error: 'Video not found' });
     }
 
     // Return mock clips based on subtitle segments

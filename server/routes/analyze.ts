@@ -220,15 +220,26 @@ analyzeVideoRoute.post('/', async (req, res) => {
     progressEmitter.emitProgress(jid, 'subtitles', 15, 'Fetching subtitles...');
     const videoData = await getVideoWithSubtitles(videoId);
     if (!videoData) {
-      progressEmitter.emitProgress(jid, 'error', 0, 'Video not found or no subtitles');
-      return res.status(404).json({ error: 'Video not found or no subtitles available' });
+      progressEmitter.emitProgress(jid, 'error', 0, 'Video not found');
+      return res.status(404).json({ error: 'Video not found' });
     }
 
     progressEmitter.emitProgress(jid, 'subtitles', 30, 'Subtitles fetched');
 
     // ── Stage 2: Analyzing (30% → 70%) ─────────────────────────────
-    progressEmitter.emitProgress(jid, 'analyzing', 35, 'AI analyzing content...');
-    const clips = await analyzeClips(videoData.subtitles, videoData.title, videoData.description);
+    let clips: Array<{ start: number; end: number; title: string }>;
+    if (videoData.subtitles.length === 0) {
+      console.warn(`[Analyze] No subtitles for YouTube video ${videoId}, using single clip`);
+      progressEmitter.emitProgress(jid, 'analyzing', 50, 'No subtitles, using full video as clip...');
+      clips = [{
+        start: 0,
+        end: videoData.duration,
+        title: videoData.title,
+      }];
+    } else {
+      progressEmitter.emitProgress(jid, 'analyzing', 35, 'AI analyzing content...');
+      clips = await analyzeClips(videoData.subtitles, videoData.title, videoData.description);
+    }
 
     progressEmitter.emitProgress(jid, 'analyzing', 70, 'Analysis complete');
 

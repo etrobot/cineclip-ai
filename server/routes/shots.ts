@@ -2,7 +2,7 @@ import { Router } from 'express';
 import * as path from 'path';
 import * as fs from 'fs';
 import { asc, eq, or, like, sql } from 'drizzle-orm';
-import { segmentShots } from '../services/shotSegmentation';
+import { segmentShots, parseClipTimeRange, type ShotAnalysisContext } from '../services/shotSegmentation';
 import { progressEmitter } from '../services/progressEmitter';
 import { db } from '../db';
 import { shots as shotsTable, clips as clipsTable } from '../db/schema';
@@ -186,41 +186,26 @@ shotsRoute.post('/', async (req, res) => {
 
     progressEmitter.emitProgress(jid, 'extracting', 5, 'Extracting sampling frames...');
 
-    // Adjust subtitle timestamps to be relative to clip start
-    let relativeSubtitles: Array<{ start: number; end: number; text: string }> | undefined;
-    let fullSubtitles: Array<{ start: number; end: number; text: string }> = [];
-    if (subtitles && Array.isArray(subtitles)) {
-      fullSubtitles = subtitles;
-      const baseName = path.parse(clipFileName).name;
-      const parts = baseName.split('_');
-      let clipStartTime = 0;
-      if (parts.length >= 3) {
-        const videoId = parts[0];
-        const timePart = baseName.slice(videoId.length + 1);
-        const timeParts = timePart.split('_');
-        if (timeParts.length >= 2) {
-          clipStartTime = parseFloat(timeParts[0].replace(/p/g, '.')) || 0;
-        }
-      }
+    const fullSubtitles: Array<{ start: number; end: number; text: string }> =
+      subtitles && Array.isArray(subtitles) ? subtitles : [];
 
-      relativeSubtitles = subtitles
-        .filter(s => s.end > clipStartTime)
-        .map(s => ({
-          start: Math.max(0, s.start - clipStartTime),
-          end: s.end - clipStartTime,
-          text: s.text,
-        }));
-    }
+    const clipTimeRange = parseClipTimeRange(clipId) ?? parseClipTimeRange(clipFileName);
+    const clipStartTime = clipTimeRange?.start ?? 0;
+    const clipEndTime = clipTimeRange?.end ?? 0;
+
+    console.log(`Shot segmentation clip range: [${clipStartTime}s - ${clipEndTime || '?'}s], full subtitles: ${fullSubtitles.length}条`);
 
     progressEmitter.emitProgress(jid, 'analyzing', 35, 'Analyzing with vision model...');
 
-    // Build video context if title/description are provided
-    const videoCtx = videoTitle
-      ? { videoTitle, videoDescription: videoDescription || '', subtitles: fullSubtitles }
-      : undefined;
+    const analysisCtx: ShotAnalysisContext = {
+      fullSubtitles,
+      clipStartTime,
+      clipEndTime,
+      videoTitle: videoTitle || undefined,
+      videoDescription: videoDescription || undefined,
+    };
 
-    // Run segmentation
-    const { shots: shotSegments, gridUrl } = await segmentShots(clipPath, clipId, relativeSubtitles, videoCtx);
+    const { shots: shotSegments, gridUrl } = await segmentShots(clipPath, clipId, analysisCtx);
 
     const shotRows = shotSegments.map((shot, idx) => {
       const shotFileName = `${clipId}_shot_${idx}.mp4`;

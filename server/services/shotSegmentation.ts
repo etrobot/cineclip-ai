@@ -5,9 +5,8 @@ import * as path from 'path';
 import sharp from 'sharp';
 import { extractClip } from './ffmpeg';
 import type { SubtitleSegment } from './youtube';
-import { buildVideoContextBlock, formatTime } from './llmPrompt';
-import type { VideoContext } from './llmPrompt';
-import { extractFrameAt, getSceneTimestamps, addSceneIndexToBuffer, MAX_GRID_CELLS, MAX_GRID_COLS, MAX_GRID_ROWS } from './grid';
+import { buildShotVLUserPrompt } from './llmPrompt';
+import { extractFrameAt, getSceneTimestamps, removeNearDuplicateFrames, addSceneIndexToBuffer, renderCompositeGrid, MAX_GRID_CELLS, MAX_GRID_COLS, MAX_GRID_ROWS } from './grid';
 
 const execAsync = promisify(exec);
 
@@ -40,13 +39,31 @@ interface SceneBoundary {
   endUs: number;
 }
 
+export interface ShotAnalysisContext {
+  fullSubtitles: SubtitleSegment[];
+  clipStartTime: number;
+  clipEndTime: number;
+  videoTitle?: string;
+  videoDescription?: string;
+}
+
 /**
- * Subtitle segment within a clip time range
+ * Parse clip start/end times from clipId or filename (e.g. videoId_0p6_130p1).
  */
-interface ClipSubtitle {
-  start: number;
-  end: number;
-  text: string;
+export function parseClipTimeRange(name: string): { start: number; end: number } | null {
+  const baseName = path.parse(name).name;
+  const underscoreIdx = baseName.indexOf('_');
+  if (underscoreIdx < 0) return null;
+
+  const videoId = baseName.slice(0, underscoreIdx);
+  const timePart = baseName.slice(videoId.length + 1);
+  const timeParts = timePart.split('_');
+  if (timeParts.length < 2) return null;
+
+  const start = parseFloat(timeParts[0].replace(/p/g, '.'));
+  const end = parseFloat(timeParts[1].replace(/p/g, '.'));
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  return { start, end };
 }
 
 /**
@@ -71,6 +88,8 @@ function bufferToDataUrl(jpegBuf: Buffer): string {
 /**
  * Call VL model with multi-modal prompt (images + text).
  * Returns raw API response.
+ *
+ * Retries on 429 (rate limited) and 5xx (server error) with exponential backoff.
  */
 async function callVLModel(
   modelMessages: Array<any>
@@ -80,31 +99,54 @@ async function callVLModel(
     throw new Error('OPENAI_API_KEY not configured for VL model');
   }
 
-  const response = await fetch(`${cfg.baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${cfg.apiKey}`,
-    },
-    body: JSON.stringify({
-      model: cfg.model,
-      messages: modelMessages,
-      temperature: 0.35,
-      max_tokens: 8192,
-    }),
-  });
+  const MAX_RETRIES = 3;
+  const BASE_DELAY_MS = 2000;
 
-  const responseText = await response.text();
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const response = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: modelMessages,
+        temperature: 0.35,
+        max_tokens: 8192,
+      }),
+    });
 
-  if (!response.ok) {
-    throw new Error(`VL API error: ${response.status} ${response.statusText} - ${responseText}`);
+    const responseText = await response.text();
+
+    // Retry on 429 (rate limited) or 5xx (server error)
+    if (!response.ok && (response.status === 429 || response.status >= 500) && attempt < MAX_RETRIES) {
+      const retryAfter = response.headers.get('Retry-After');
+      let delay: number;
+      if (retryAfter) {
+        // Respect Retry-After header (seconds)
+        delay = parseInt(retryAfter, 10) * 1000;
+      } else {
+        // Exponential backoff: 2s, 4s, 8s + jitter
+        delay = BASE_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
+      }
+      console.warn(`VL API ${response.status}, retrying in ${Math.round(delay / 1000)}s (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      continue;
+    }
+
+    if (!response.ok) {
+      throw new Error(`VL API error: ${response.status} ${response.statusText} - ${responseText}`);
+    }
+
+    const result = (() => { try { return { ok: true as const, value: JSON.parse(responseText) }; } catch { return { ok: false as const }; } })();
+    if (!result.ok) {
+      throw new Error(`VL API returned invalid JSON: ${responseText.slice(0, 200)}`);
+    }
+    return result.value;
   }
 
-  const result = (() => { try { return { ok: true as const, value: JSON.parse(responseText) }; } catch { return { ok: false as const }; } })();
-  if (!result.ok) {
-    throw new Error(`VL API returned invalid JSON: ${responseText.slice(0, 200)}`);
-  }
-  return result.value;
+  throw new Error('VL API: max retries exceeded');
 }
 
 /**
@@ -261,18 +303,7 @@ async function buildSceneGrid(
     }
   }
 
-  // Create canvas and composite
-  let gridImage = sharp({
-    create: { width: gridW, height: gridH, channels: 3, background: { r: 0, g: 0, b: 0 } },
-  });
-
-  const batchSize = 50;
-  for (let i = 0; i < composites.length; i += batchSize) {
-    const batch = composites.slice(i, i + batchSize);
-    gridImage = gridImage.composite(batch);
-  }
-
-  return gridImage.jpeg({ quality: 90 }).toBuffer();
+  return renderCompositeGrid(gridW, gridH, composites);
 }
 
 // extractFrameAt and getSceneTimestamps are imported from ./grid
@@ -284,9 +315,8 @@ async function buildSceneGrid(
 async function analyzeGridSegments(
   gridBuf: Buffer,
   scenes: SceneBoundary[],
-  subtitles: ClipSubtitle[],
   clipDuration: number,
-  videoCtx?: VideoContext
+  analysisCtx?: ShotAnalysisContext
 ): Promise<Array<{ startScene: number; endScene: number; label: string; category: string }>> {
   const cfg = vlEnv();
   if (!cfg.apiKey) {
@@ -299,25 +329,22 @@ async function analyzeGridSegments(
     `#${scene.index} [${scene.start.toFixed(6)}-${scene.end.toFixed(6)}]`
   ).join('\n');
 
-  // Build subtitle text
-  const subtitleLines = subtitles.map((s, i) =>
-    `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
-  ).join('\n');
+  const userText = buildShotVLUserPrompt({
+    clipStartTime: analysisCtx?.clipStartTime ?? 0,
+    clipEndTime: analysisCtx?.clipEndTime ?? clipDuration,
+    clipDuration,
+    fullSubtitles: analysisCtx?.fullSubtitles ?? [],
+    sceneIndexList,
+    sceneList,
+    videoTitle: analysisCtx?.videoTitle,
+    videoDescription: analysisCtx?.videoDescription,
+  });
 
-  let userText = `时长：${clipDuration.toFixed(6)}s\n\n`;
-  userText += `可选 scene 序号：${sceneIndexList}\n\n`;
-  userText += `scene 列表：\n${sceneList}\n\n`;
-  if (subtitleLines) {
-    userText += `字幕：\n${subtitleLines}\n\n`;
-  }
-  if (videoCtx) {
-    const contextBlock = buildVideoContextBlock(videoCtx);
-    userText += `${contextBlock}\n\n`;
-  }
+  console.log(`Shot VL prompt: clip [${analysisCtx?.clipStartTime ?? 0}s - ${analysisCtx?.clipEndTime ?? clipDuration}s], subtitles=${analysisCtx?.fullSubtitles?.length ?? 0}条`);
 
   const systemContent = `根据帧合集提取分镜。每张图左下角黄色标记是 scene 序号，不是时间。画面相似的连续 scene 合并为一段，画面明显不同才分段。只输出JSON。
 
-输出格式：{"segments":[{"startScene":1,"endScene":3,"label":"火箭组装","category":"纪录"},{"startScene":4,"endScene":6,"label":"电子产线","category":"纪录"},{"startScene":7,"endScene":10,"label":"发射场景","category":"纪录"}]}
+输出格式：{"segments":[{"startScene":1,"endScene":3,"label":"用卡通角色飞入动效介绍产品三大核心功能","category":"演示"},{"startScene":4,"endScene":6,"label":"用柱状图动画讲解2024年各季度销量增长趋势","category":"图表"},{"startScene":7,"endScene":10,"label":"用快切特写展示工厂机械臂组装芯片全过程","category":"纪录"}]}
 
 category 分类（每段必须选一个）：讲座、标题、图表、纪录、卡通、访谈、新闻、演示、动画、片头、片尾、过渡、广告、音乐、其他
 
@@ -327,7 +354,12 @@ category 分类（每段必须选一个）：讲座、标题、图表、纪录�
 - 首段 startScene=1，末段 endScene=${numScenes}
 - 前一段 endScene + 1 = 下一段 startScene
 - 不允许跳号、不允许重叠、不允许遗漏任何 scene
-- label 用具体内容命名，禁止用"描述""片段"等空洞词`;
+- label 必须同时包含三个要素：①呈现手法（镜头/动效/转场，如飞入、缩放、快切、特写、分屏、淡入）②主体对象（人物/产品/图表/场景）③讲解或展示的具体内容（这段在讲什么、展示什么）
+- label 写法参考：「用[动效/镜头]讲解/展示/介绍[具体内容]」「[主体]在[场景]中[具体动作]说明[知识点]」
+- 必须结合完整字幕 JSON 中该段对应时间范围内的内容（clip绝对时间 = clip起始时间 + scene相对时间），说明这段视频在传达什么信息
+- label 长度 15-40 字，信息密度要高，让人一看就知道这段在干什么
+- 禁止笼统 label：开场动画、卡通动画、图表展示、过渡画面、片头片尾、描述、片段、场景 等无具体信息的词
+- category 只表示画面类型，具体语义写在 label 里，不要把 category 当 label 用`;
 
   const messages = [
     { role: 'system', content: systemContent },
@@ -423,8 +455,7 @@ export interface AnalyzeShotsResult {
 
 export async function analyzeShots(
   clipPath: string,
-  subtitles?: ClipSubtitle[],
-  videoCtx?: VideoContext
+  analysisCtx?: ShotAnalysisContext
 ): Promise<AnalyzeShotsResult> {
   console.log(`Analyzing shots for clip: ${clipPath}`);
 
@@ -444,6 +475,19 @@ export async function analyzeShots(
 
   console.log(`Clip: ${clipDuration.toFixed(3)}s, ${videoWidth}x${videoHeight}`);
 
+  const normalizedCtx = analysisCtx
+    ? {
+        ...analysisCtx,
+        clipEndTime: analysisCtx.clipEndTime > analysisCtx.clipStartTime
+          ? analysisCtx.clipEndTime
+          : analysisCtx.clipStartTime + clipDuration,
+      }
+    : undefined;
+
+  if (normalizedCtx) {
+    console.log(`Clip in full video: [${normalizedCtx.clipStartTime.toFixed(1)}s - ${normalizedCtx.clipEndTime.toFixed(1)}s], subtitles=${normalizedCtx.fullSubtitles.length}条`);
+  }
+
   // Step 1: Use FFmpeg scene detection to get keyframe timestamps
   console.log('Detecting scene changes with FFmpeg...');
   const timestamps = await getSceneTimestamps(clipPath, MAX_GRID_CELLS);
@@ -454,23 +498,26 @@ export async function analyzeShots(
   }
 
   // Step 2: Extract frames at detected timestamps
-  const keyFrames: SamplingFrame[] = [];
+  const extractedFrames: SamplingFrame[] = [];
   for (let i = 0; i < timestamps.length; i++) {
     const ts = timestamps[i];
     const frame = await extractFrameAt(clipPath, ts);
     if (frame) {
-      keyFrames.push({ ...frame, timestamp: ts, sceneIndex: i + 1 });
+      extractedFrames.push({ ...frame, timestamp: ts, sceneIndex: i + 1 });
     }
   }
 
-  if (keyFrames.length !== timestamps.length) {
-    throw new Error(`Failed to extract all scene frames: expected ${timestamps.length}, got ${keyFrames.length}`);
+  if (extractedFrames.length !== timestamps.length) {
+    throw new Error(`Failed to extract all scene frames: expected ${timestamps.length}, got ${extractedFrames.length}`);
   }
 
-  const boundaries: number[] = [...timestamps, clipDuration];
+  const keyFrames = (await removeNearDuplicateFrames(extractedFrames))
+    .map((frame, i) => ({ ...frame, sceneIndex: i + 1 }));
+  console.log(`Shot grid: visual dedupe ${extractedFrames.length} → ${keyFrames.length} frames`);
+
   const scenes: SceneBoundary[] = keyFrames.map((frame, i) => {
     const start = frame.timestamp;
-    const end = boundaries[i + 1];
+    const end = keyFrames[i + 1]?.timestamp ?? clipDuration;
     return {
       index: frame.sceneIndex,
       start,
@@ -489,9 +536,8 @@ export async function analyzeShots(
   const segments = await analyzeGridSegments(
     gridBuf,
     scenes,
-    subtitles || [],
     clipDuration,
-    videoCtx
+    normalizedCtx
   );
 
   // Step 5: Build ShotSegment array from VL suggestions via scene-index → precise boundary mapping
@@ -588,11 +634,10 @@ export async function cutShots(
 export async function segmentShots(
   clipPath: string,
   clipId: string,
-  subtitles?: ClipSubtitle[],
-  videoCtx?: VideoContext
+  analysisCtx?: ShotAnalysisContext
 ): Promise<{ shots: Array<{ start: number; end: number; label: string; category: string; clipUrl: string; thumbnailUrl: string; duration: string }>; gridUrl: string }> {
   // Analyze shots
-  const { shots, gridBuf } = await analyzeShots(clipPath, subtitles, videoCtx);
+  const { shots, gridBuf } = await analyzeShots(clipPath, analysisCtx);
 
   // Save grid image to file
   let gridUrl = '';

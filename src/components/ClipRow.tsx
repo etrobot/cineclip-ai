@@ -1,8 +1,10 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw, Grid2x2, Trash2 as TrashVideo } from "lucide-react";
+import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw, Grid2x2, Trash2 as TrashVideo, Table2 } from "lucide-react";
 import React, { useState, useEffect } from "react";
-import { API_BASE_URL, segmentShots, listShots, getServerConfig, type ShotInfo, type SubtitleItem } from "../api/client";
+import { API_BASE_URL, listShots, getServerConfig, type ShotInfo, type SubtitleItem } from "../api/client";
 import type { ClipItem } from "../App";
+import type { ShotQueueItem, EnqueueShotParams } from "../hooks/useShotQueue";
+import { StoryboardView } from "./StoryboardView";
 
 interface ClipCardProps {
   clip: ClipItem;
@@ -10,6 +12,10 @@ interface ClipCardProps {
   onDelete?: (clipId: string) => void;
   onRetry?: (clipId: string) => void;
   subtitles?: SubtitleItem[];
+  shotQueueItem?: ShotQueueItem;
+  queuePosition: number;
+  onEnqueueShot: (params: EnqueueShotParams) => void;
+  onRetryShot: (clipId: string) => void;
 }
 
 /** Map backend render stage to user-friendly label */
@@ -24,17 +30,22 @@ function getRenderStageLabel(stage: string, message: string): string {
   return message || RENDER_STAGE_LABELS[stage] || stage;
 }
 
-export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRetry, subtitles }) => {
+export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRetry, subtitles, shotQueueItem, queuePosition, onEnqueueShot, onRetryShot }) => {
   const isRendering = clip.status === "pending" || clip.status === "rendering";
   const isError = clip.status === "error";
   const isDone = clip.status === "done";
   // Shot segmentation state
   const [shots, setShots] = useState<ShotInfo[]>([]);
-  const [shotsLoading, setShotsLoading] = useState(false);
   const [showShots, setShowShots] = useState(false);
   const [vlEnabled, setVlEnabled] = useState<boolean | null>(null);
   const [gridUrl, setGridUrl] = useState<string>('');
   const [showGrid, setShowGrid] = useState(false);
+
+  // Derive shot-detection status from queue item
+  const shotStatus = shotQueueItem?.status;
+  const isShotQueued = shotStatus === "pending";
+  const isShotProcessing = shotStatus === "processing";
+  const isShotError = shotStatus === "error";
 
   const handlePlay = () => {
     if (clip.clipUrl) {
@@ -84,26 +95,35 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
       .catch(() => {});
   }, [clip.id, isDone]);
 
-  const handleDetectShots = async (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (shotsLoading) return;
-    if (!clip.clipUrl) return;
-
-    // Clear old shots immediately before re-segmentation
-    setShots([]);
-    setShotsLoading(true);
-    try {
-      const result = await segmentShots(clip.clipUrl, clip.id, subtitles);
-      setShots(result.shots);
-      if (result.gridUrl) {
-        setGridUrl(result.gridUrl);
+  // React to shot-queue status changes: populate shots when detection completes
+  useEffect(() => {
+    if (shotQueueItem?.status === "done" && shotQueueItem.result) {
+      setShots(shotQueueItem.result.shots);
+      if (shotQueueItem.result.gridUrl) {
+        setGridUrl(shotQueueItem.result.gridUrl);
       }
       setShowShots(true);
-    } catch (err) {
-      console.error("Failed to detect shots:", err);
-    } finally {
-      setShotsLoading(false);
     }
+  }, [shotQueueItem?.status, shotQueueItem?.result]);
+
+  const handleDetectShots = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!clip.clipUrl) return;
+    // Ignore if already pending or processing
+    if (isShotQueued || isShotProcessing) return;
+    // Clear old shots when (re-)queueing
+    setShots([]);
+    onEnqueueShot({
+      clipUrl: clip.clipUrl,
+      clipId: clip.id,
+      clipTitle: clip.title,
+      subtitles,
+    });
+  };
+
+  const handleRetryShot = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onRetryShot(clip.id);
   };
 
   const fullThumbnailSrc = clip.renderedThumbnailUrl
@@ -207,17 +227,41 @@ export const ClipCard: React.FC<ClipCardProps> = ({ clip, index, onDelete, onRet
                 <>
                   {/* Detect Shots button - only show when VL model configured */}
                   {vlEnabled && (
-                    <button
-                      onClick={handleDetectShots}
-                      className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-emerald-400 transition-colors"
-                      title="Detect shots"
-                    >
-                      {shotsLoading ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : (
-                        <Film className="w-4 h-4" />
-                      )}
-                    </button>
+                    <>
+                      <button
+                        onClick={isShotError ? handleRetryShot : handleDetectShots}
+                        disabled={isShotQueued || isShotProcessing}
+                        className={`relative p-1.5 rounded-lg transition-colors disabled:opacity-60 ${
+                          isShotError
+                            ? "hover:bg-red-900/30 text-red-500 hover:text-red-400"
+                            : isShotProcessing
+                            ? "text-emerald-400"
+                            : "hover:bg-zinc-800 text-zinc-400 hover:text-emerald-400"
+                        }`}
+                        title={
+                          isShotError
+                            ? `Error: ${shotQueueItem?.errorMessage || "Failed"}. Click to retry.`
+                            : isShotProcessing
+                            ? "Detecting shots..."
+                            : isShotQueued
+                            ? `Queued #${queuePosition}`
+                            : "Detect shots"
+                        }
+                      >
+                        {isShotProcessing ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : isShotError ? (
+                          <RotateCcw className="w-4 h-4" />
+                        ) : (
+                          <Film className="w-4 h-4" />
+                        )}
+                        {isShotQueued && (
+                          <span className="absolute -top-1.5 -right-1.5 bg-amber-500 text-black text-[8px] font-bold rounded-full w-3.5 h-3.5 flex items-center justify-center">
+                            {queuePosition}
+                          </span>
+                        )}
+                      </button>
+                    </>
                   )}
                   <button
                     onClick={(e) => {
@@ -375,9 +419,16 @@ interface ClipRowProps {
   onDeleteVideo?: (videoId: string) => void;
   onRetryClip?: (clipId: string) => void;
   subtitles?: SubtitleItem[];
+  shotQueueItems: ShotQueueItem[];
+  onEnqueueShot: (params: EnqueueShotParams) => void;
+  onRetryShot: (clipId: string) => void;
 }
 
-export function ClipRow({ videoTitle, videoThumbnail, clips, videoId, onDeleteClip, onDeleteVideo, onRetryClip, subtitles }: ClipRowProps) {
+export function ClipRow({ videoTitle, videoThumbnail, clips, videoId, onDeleteClip, onDeleteVideo, onRetryClip, subtitles, shotQueueItems, onEnqueueShot, onRetryShot }: ClipRowProps) {
+  // Pre-compute pending items list for position calculation
+  const pendingItems = shotQueueItems.filter((item) => item.status === "pending");
+  const [showStoryboard, setShowStoryboard] = useState(false);
+
   return (
     <div className="mb-8">
       <div className="flex items-center gap-3 mb-4">
@@ -389,28 +440,56 @@ export function ClipRow({ videoTitle, videoThumbnail, clips, videoId, onDeleteCl
         <h2 className="text-lg font-bold text-white tracking-tight line-clamp-1">
           {videoTitle}
         </h2>
-        {onDeleteVideo && (
+        <div className="flex items-center gap-1.5 ml-auto">
           <button
-            onClick={() => onDeleteVideo(videoId)}
-            className="p-1.5 rounded-lg hover:bg-red-900/30 text-zinc-400 hover:text-red-500 transition-colors ml-auto"
-            title="Delete all clips for this video"
+            onClick={() => setShowStoryboard(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-emerald-400 transition-colors text-xs font-medium"
+            title="Generate storyboard"
           >
-            <Trash2 className="w-4 h-4" />
+            <Table2 className="w-4 h-4" />
+            <span className="hidden sm:inline">Sheet</span>
           </button>
-        )}
+          {onDeleteVideo && (
+            <button
+              onClick={() => onDeleteVideo(videoId)}
+              className="p-1.5 rounded-lg hover:bg-red-900/30 text-zinc-400 hover:text-red-500 transition-colors"
+              title="Delete all clips for this video"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex flex-col gap-2">
-        {clips.map((clip, i) => (
-          <ClipCard
-            key={clip.id}
-            clip={clip}
-            index={i}
-            onDelete={onDeleteClip}
-            onRetry={onRetryClip}
-            subtitles={subtitles}
-          />
-        ))}
+        {clips.map((clip, i) => {
+          const shotItem = shotQueueItems.find((item) => item.clipId === clip.id);
+          const queuePosition = shotItem?.status === "pending"
+            ? pendingItems.findIndex((item) => item.clipId === clip.id) + 1
+            : 0;
+          return (
+            <ClipCard
+              key={clip.id}
+              clip={clip}
+              index={i}
+              onDelete={onDeleteClip}
+              onRetry={onRetryClip}
+              subtitles={subtitles}
+              shotQueueItem={shotItem}
+              queuePosition={queuePosition}
+              onEnqueueShot={onEnqueueShot}
+              onRetryShot={onRetryShot}
+            />
+          );
+        })}
       </div>
+
+      {/* Storyboard Modal */}
+      <StoryboardView
+        isOpen={showStoryboard}
+        onClose={() => setShowStoryboard(false)}
+        videoId={videoId}
+        videoTitle={videoTitle}
+      />
     </div>
   );
 }

@@ -333,6 +333,7 @@ export function useChannelQueue(onClipComplete?: () => void) {
 
       try {
         await processOneVideo(item);
+        onClipComplete?.();
       } catch (err: any) {
         updateFetchItem(item.video.videoId, {
           status: "error",
@@ -343,7 +344,6 @@ export function useChannelQueue(onClipComplete?: () => void) {
     }
 
     setIsFetching(false);
-    onClipComplete?.();
   }, [fetchQueue, onClipComplete, processOneVideo, updateFetchItem]);
 
   const stopFetch = useCallback(() => {

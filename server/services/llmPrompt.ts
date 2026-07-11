@@ -93,8 +93,8 @@ export function buildShotSystemPrompt(): string {
 
 【重要说明】
 你看到的是从完整视频中提取出来的一个 clip（片段），而非完整视频。
-下方提供的字幕也只包含该 clip 范围内的内容。
-但你同时会收到整支视频的标题和简介，供你理解该 clip 在整体上下文中的意义。
+你会收到整支视频的完整字幕 JSON（绝对时间），以及该 clip 在整支视频中的起止时间。
+scene 列表的时间是 clip 内相对秒数（0 = clip 开头）；对照字幕时需换算：整支视频绝对时间 = clip起始时间 + scene相对时间。
 
 【任务说明】
 每个 shot 代表一个独立的镜头或场景
@@ -108,24 +108,82 @@ export function buildShotSystemPrompt(): string {
 - 示例：某个 shot 从第 2.3 秒开始，第 5.7 秒结束，应输出 {"start":2.3,"end":5.7,"label":"..."}
 - 时间范围必须在 [0, clipDuration] 内
 - shot 之间不能重叠
-- label 是简短描述该 shot 的内容，比如xx图表动画、工厂xx操作、办公室xxx、地球xxx`;
+- label 必须同时包含三个要素：①呈现手法（镜头/动效/转场）②主体对象 ③讲解或展示的具体内容
+- 写法参考：「用[飞入/缩放/快切/特写]动效讲解[具体内容]」「[主体]在[场景]中[具体动作]」
+- 必须结合完整字幕 JSON 中该时间段的内容，说明这段在传达什么信息
+- label 长度 15-40 字，禁止笼统描述如"开场动画""卡通动画""图表展示"`;
+}
+
+/** Serialize full subtitles as JSON for LLM prompts (absolute video time). */
+export function buildFullSubtitlesJson(subtitles: SubtitleSegment[]): string {
+  return JSON.stringify(
+    subtitles.map(s => ({ start: s.start, end: s.end, text: s.text })),
+    null,
+    2
+  );
+}
+
+export interface ShotVLUserPromptInput {
+  clipStartTime: number;
+  clipEndTime: number;
+  clipDuration: number;
+  fullSubtitles: SubtitleSegment[];
+  sceneIndexList: string;
+  sceneList: string;
+  videoTitle?: string;
+  videoDescription?: string;
+}
+
+/**
+ * Build user prompt for VL shot grid segmentation.
+ * Uses full subtitle JSON (absolute time) + clip range in original video.
+ */
+export function buildShotVLUserPrompt(input: ShotVLUserPromptInput): string {
+  const {
+    clipStartTime,
+    clipEndTime,
+    clipDuration,
+    fullSubtitles,
+    sceneIndexList,
+    sceneList,
+    videoTitle,
+    videoDescription,
+  } = input;
+
+  let text = `【当前分析的 clip】\n`;
+  text += `在整支视频中的起止时间：[${formatTime(clipStartTime)} - ${formatTime(clipEndTime)}]（${clipStartTime.toFixed(1)}s - ${clipEndTime.toFixed(1)}s）\n`;
+  text += `clip 时长：${clipDuration.toFixed(1)}s\n\n`;
+
+  text += `可选 scene 序号：${sceneIndexList}\n\n`;
+  text += `scene 列表（时间为 clip 内相对秒数，0 = clip 开头）：\n${sceneList}\n\n`;
+
+  if (fullSubtitles.length > 0) {
+    text += `完整字幕 JSON（时间为整支视频的绝对秒数，共 ${fullSubtitles.length} 条）：\n`;
+    text += `${buildFullSubtitlesJson(fullSubtitles)}\n\n`;
+    text += `写 label 时：将 scene 的 clip 内时间加上 clip 起始时间（${clipStartTime.toFixed(1)}s），在完整字幕 JSON 中找到对应内容，结合画面写出具体 label。\n\n`;
+  }
+
+  if (videoTitle?.trim()) {
+    text += `整支视频标题：${videoTitle.trim()}\n`;
+    if (videoDescription?.trim()) {
+      text += `视频简介：\n${videoDescription.trim()}\n`;
+    }
+    text += '\n';
+  }
+
+  return text;
 }
 
 /**
  * Build user prompt for shot segmentation.
- * @param clipDuration   Duration of the clip in seconds (for boundary checking mention)
- * @param clipSubtitles  Subtitles only within the clip time range
  */
 export function buildShotUserPrompt(
   ctx: VideoContext,
   clipDuration: number,
-  clipSubtitles: SubtitleSegment[]
+  clipStartTime: number,
+  clipEndTime: number
 ): string {
   const contextBlock = buildVideoContextBlock(ctx);
 
-  const clipSubtitleLines = clipSubtitles.map((s, i) =>
-    `#${i + 1} [${formatTime(s.start)}-${formatTime(s.end)}] ${s.text}`
-  ).join('\n');
-
-  return `${contextBlock}\n\n【当前分析的是以下 clip】\nclip 时长：${clipDuration.toFixed(1)} 秒\nclip 内字幕：\n${clipSubtitleLines || '（无字幕）'}\n\n每张采样图的左下角有黄色时间戳（如 0:02），表示该图在 clip 中的秒数，与字幕时间戳一致。\n\n请结合整支视频的主题，将该 clip 分割成若干 shots，输出JSON。`;
+  return `${contextBlock}\n\n【当前分析的是以下 clip】\n在整支视频中的起止时间：[${formatTime(clipStartTime)} - ${formatTime(clipEndTime)}]（${clipStartTime.toFixed(1)}s - ${clipEndTime.toFixed(1)}s）\nclip 时长：${clipDuration.toFixed(1)} 秒\n完整字幕 JSON：\n${buildFullSubtitlesJson(ctx.subtitles)}\n\n每张采样图的左下角有黄色 scene 序号，scene 列表中的时间是 clip 内相对秒数。对照字幕时将 clip 内时间加上 clip 起始时间即可。\n\n请结合整支视频的主题和完整字幕，将该 clip 分割成若干 shots，输出JSON。`;
 }

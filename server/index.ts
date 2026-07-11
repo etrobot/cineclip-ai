@@ -14,6 +14,7 @@ import { galleryRoute } from './routes/gallery';
 import { shotsRoute } from './routes/shots';
 import { clipsRoute } from './routes/clips';
 import { channelRoute } from './routes/channel';
+import { storyboardRoute } from './routes/storyboard';
 import { wsManager } from './services/wsManager';
 import { runMigrations } from './db';
 import { runConsistencyCheck, printConsistencyReport } from './services/consistencyCheck';
@@ -82,6 +83,7 @@ app.use('/api/grid', gridRoute);
 app.use('/api/gallery', galleryRoute);
 app.use('/api/shots', shotsRoute);
 app.use('/api/channel', channelRoute);
+app.use('/api/storyboard', storyboardRoute);
 
 // Health check
 app.get('/health', (req, res) => {

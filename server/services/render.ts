@@ -26,14 +26,15 @@ export async function renderClip(
 
   console.log(`Rendering clip: ${start}s - ${end}s`);
 
-  // Use ffmpeg to cut the original video segment
+  // Shot analysis needs frame-accurate clips. Stream copy can drop everything
+  // before the next keyframe (some downloads have 6s GOPs).
   console.log(`Cutting clip: ${start}s - ${end}s`);
   await extractClip({
     videoPath: inputPath,
     startSec: start,
     endSec: end,
     outputPath,
-    codec: 'copy',
+    codec: 'reencode',
   });
   console.log(`Clip saved to ${outputPath}`);
   return outputPath;
@@ -63,7 +64,7 @@ export async function renderMultipleClips(
       startSec: clip.start,
       endSec: clip.end,
       outputPath: clipOutput,
-      codec: 'copy',
+      codec: 'reencode',
     });
     outputPaths.push(clipOutput);
   }

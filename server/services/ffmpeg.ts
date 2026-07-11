@@ -1,4 +1,4 @@
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -344,8 +344,168 @@ export async function getVideoDuration(videoPath: string): Promise<number> {
   return info.duration;
 }
 
+const SCENE_SCAN_WIDTH = 160;
+const SCENE_SCAN_HEIGHT = 90;
+const SCENE_SCAN_FPS = 6;
+const SCENE_FRAME_BYTES = SCENE_SCAN_WIDTH * SCENE_SCAN_HEIGHT * 3;
+
+interface SceneFrameDiff {
+  score: number;
+  histogram: number;
+  pixels: number;
+  edges: number;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+function compareSceneFrames(a: Buffer, b: Buffer): SceneFrameDiff {
+  const histA = new Uint32Array(96);
+  const histB = new Uint32Array(96);
+  let pixelDelta = 0;
+  let edgeDelta = 0;
+  let edgeSamples = 0;
+
+  for (let i = 0; i < SCENE_FRAME_BYTES; i++) {
+    const av = a[i];
+    const bv = b[i];
+    const channelOffset = (i % 3) * 32;
+    histA[channelOffset + (av >> 3)]++;
+    histB[channelOffset + (bv >> 3)]++;
+    pixelDelta += Math.abs(av - bv);
+
+    if (i >= 3 && Math.floor(i / 3) % SCENE_SCAN_WIDTH !== 0) {
+      edgeDelta += Math.abs(Math.abs(av - a[i - 3]) - Math.abs(bv - b[i - 3]));
+      edgeSamples++;
+    }
+  }
+
+  let intersection = 0;
+  for (let i = 0; i < histA.length; i++) {
+    intersection += Math.min(histA[i], histB[i]);
+  }
+
+  const histogram = 1 - intersection / SCENE_FRAME_BYTES;
+  const pixels = pixelDelta / (SCENE_FRAME_BYTES * 255);
+  const edges = edgeSamples > 0 ? edgeDelta / (edgeSamples * 255) : 0;
+
+  return {
+    histogram,
+    pixels,
+    edges,
+    score: histogram * 0.55 + pixels * 0.3 + edges * 0.15,
+  };
+}
+
+async function scanSceneFrames(videoPath: string, hardwareDecode: boolean, sensitivity: number): Promise<number[]> {
+  const args = [
+    '-hide_banner',
+    '-loglevel', 'error',
+    ...(hardwareDecode ? ['-hwaccel', 'videotoolbox'] : []),
+    '-i', videoPath,
+    '-an',
+    '-vf', `fps=${SCENE_SCAN_FPS},scale=${SCENE_SCAN_WIDTH}:${SCENE_SCAN_HEIGHT}:flags=fast_bilinear,format=rgb24`,
+    '-f', 'rawvideo',
+    '-pix_fmt', 'rgb24',
+    'pipe:1',
+  ];
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let buffered = Buffer.alloc(0);
+    let stderr = '';
+    let frameIndex = 0;
+    let previous: Buffer | null = null;
+    let previousPrevious: Buffer | null = null;
+    let pendingDiff: SceneFrameDiff | null = null;
+    const recentScores: number[] = [];
+    const timestamps: number[] = [];
+    let lastBoundary = -Infinity;
+    let suppressTransitionsUntil = -Infinity;
+
+    const configuredSensitivity = Number(process.env.SCENE_DETECT_SENSITIVITY);
+    const effectiveSensitivity = Number.isFinite(configuredSensitivity)
+      ? configuredSensitivity
+      : sensitivity;
+    const clampedSensitivity = Math.min(0.95, Math.max(0.03, effectiveSensitivity));
+    const absoluteThreshold = 0.055 + clampedSensitivity * 0.18;
+    const minGap = Math.max(0.25, Number(process.env.SCENE_DETECT_MIN_GAP || 0.6));
+
+    const evaluatePending = (nextFrame: Buffer, boundaryFrameIndex: number) => {
+      if (!pendingDiff || !previousPrevious) return;
+
+      const baseline = median(recentScores);
+      const deviations = recentScores.map(score => Math.abs(score - baseline));
+      const adaptiveThreshold = baseline + Math.max(0.025, median(deviations) * 4.5);
+      const threshold = Math.max(absoluteThreshold, adaptiveThreshold);
+      const timestamp = boundaryFrameIndex / SCENE_SCAN_FPS;
+
+      // A one-frame flash has two large transitions while the frames around it remain similar.
+      const aroundFlash = compareSceneFrames(previousPrevious, nextFrame).score;
+      const isFlash = pendingDiff.score >= absoluteThreshold &&
+        aroundFlash < Math.max(0.035, pendingDiff.score * 0.38);
+      if (isFlash) suppressTransitionsUntil = timestamp + 2 / SCENE_SCAN_FPS;
+
+      if (
+        pendingDiff.score >= threshold &&
+        !isFlash &&
+        timestamp > suppressTransitionsUntil &&
+        timestamp - lastBoundary >= minGap
+      ) {
+        timestamps.push(timestamp);
+        lastBoundary = timestamp;
+      }
+
+      recentScores.push(pendingDiff.score);
+      if (recentScores.length > SCENE_SCAN_FPS * 5) recentScores.shift();
+    };
+
+    child.stdout.on('data', (chunk: Buffer) => {
+      buffered = buffered.length === 0 ? chunk : Buffer.concat([buffered, chunk]);
+      while (buffered.length >= SCENE_FRAME_BYTES) {
+        const frame = Buffer.from(buffered.subarray(0, SCENE_FRAME_BYTES));
+        buffered = buffered.subarray(SCENE_FRAME_BYTES);
+
+        if (previous) {
+          if (previousPrevious) evaluatePending(frame, frameIndex - 1);
+          pendingDiff = compareSceneFrames(previous, frame);
+        }
+        previousPrevious = previous;
+        previous = frame;
+        frameIndex++;
+      }
+    });
+
+    child.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+      if (stderr.length > 4000) stderr = stderr.slice(-4000);
+    });
+
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('scene scan timed out after 120s'));
+    }, 120000);
+
+    child.on('error', error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (code === 0) resolve(timestamps);
+      else reject(new Error(stderr.trim() || `ffmpeg exited with code ${code}`));
+    });
+  });
+}
+
 /**
- * Detect scene changes in a video using FFmpeg's select filter.
+ * Detect scene changes with a single low-resolution adaptive scan.
  * Returns array of timestamps (in seconds) where scene changes occur.
  * Threshold: 0.0-1.0, higher = less sensitive (default 0.3)
  */
@@ -357,21 +517,15 @@ export async function detectSceneChanges(
     throw new Error(`Video file not found: ${videoPath}`);
   }
 
-  // Use FFmpeg's select filter to detect scene changes
-  // The metadata shows pts_time when scene change is detected
-  const command = `ffmpeg -i "${videoPath}" -vf "select=gt(scene\\,${threshold}),showinfo" -f null - 2>&1 | grep "pts_time:" | sed 's/.*pts_time:\\([0-9.]*\\).*/\\1/'`;
-
-  console.log(`Scene detection: threshold=${threshold}`);
-
   try {
-    const { stdout } = await execAsync(command, { timeout: 120000 });
-
-    // Parse timestamps from output
-    const timestamps = stdout
-      .trim()
-      .split('\n')
-      .map(line => parseFloat(line.trim()))
-      .filter(t => !isNaN(t) && t > 0);
+    let timestamps: number[];
+    try {
+      timestamps = await scanSceneFrames(videoPath, process.platform === 'darwin', threshold);
+    } catch (hardwareError) {
+      if (process.platform !== 'darwin') throw hardwareError;
+      console.warn(`VideoToolbox scene scan failed, retrying with software decode: ${hardwareError instanceof Error ? hardwareError.message : hardwareError}`);
+      timestamps = await scanSceneFrames(videoPath, false, threshold);
+    }
 
     // Always include start (0) and end (duration)
     const duration = await getVideoDuration(videoPath);
@@ -389,7 +543,7 @@ export async function detectSceneChanges(
         return true;
       });
 
-    console.log(`Scene detection: found ${timestamps.length} raw changes, ${unique.length} unique boundaries`);
+    console.log(`Scene detection: adaptive scan found ${timestamps.length} changes, ${unique.length} boundaries`);
     return unique;
   } catch (error) {
     throw new Error(`Scene detection failed: ${error instanceof Error ? error.message : error}`);

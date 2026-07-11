@@ -3,9 +3,116 @@ import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import sharp from 'sharp';
-import { detectSceneChanges } from './ffmpeg';
+import { detectSceneChanges, getVideoDuration } from './ffmpeg';
 
 const execAsync = promisify(exec);
+
+let extractFrameCounter = 0;
+
+/**
+ * Composite tiles onto a grid canvas.
+ * Sharp pipelines must be materialized between batches — chained .composite() drops earlier layers.
+ */
+export async function renderCompositeGrid(
+  gridW: number,
+  gridH: number,
+  composites: sharp.OverlayOptions[],
+  batchSize: number = 50
+): Promise<Buffer> {
+  if (composites.length === 0) {
+    return sharp({
+      create: { width: gridW, height: gridH, channels: 3, background: { r: 0, g: 0, b: 0 } },
+    })
+      .jpeg({ quality: 90 })
+      .toBuffer();
+  }
+
+  let imageBuffer = await sharp({
+    create: { width: gridW, height: gridH, channels: 3, background: { r: 0, g: 0, b: 0 } },
+  })
+    .composite(composites.slice(0, batchSize))
+    .jpeg({ quality: 90 })
+    .toBuffer();
+
+  for (let i = batchSize; i < composites.length; i += batchSize) {
+    const batch = composites.slice(i, i + batchSize);
+    imageBuffer = await sharp(imageBuffer)
+      .composite(batch)
+      .jpeg({ quality: 90 })
+      .toBuffer();
+  }
+
+  if (composites.length > 10 && imageBuffer.length < 50_000) {
+    throw new Error(
+      `Grid composite output too small (${imageBuffer.length} bytes for ${composites.length} tiles) — likely a render failure`
+    );
+  }
+
+  return imageBuffer;
+}
+
+function pickThumbnailFrame(
+  frames: Array<{ jpegBuf: Buffer; timestamp: number }>
+): { jpegBuf: Buffer; timestamp: number } {
+  // Skip t=0 — many clips fade in from black at the first frame
+  const candidate = frames.find((f) => f.timestamp >= 0.5);
+  return candidate ?? frames[Math.min(1, frames.length - 1)] ?? frames[0];
+}
+
+interface VisualFrame {
+  jpegBuf: Buffer;
+  timestamp: number;
+}
+
+async function buildFrameSignature(jpegBuf: Buffer): Promise<Buffer> {
+  return sharp(jpegBuf)
+    .resize(64, 36, { fit: 'fill' })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+}
+
+/**
+ * Remove adjacent near-identical samples while retaining periodic coverage of
+ * long static scenes. Small text changes are preserved via changed-pixel ratio.
+ */
+export async function removeNearDuplicateFrames<T extends VisualFrame>(
+  frames: T[],
+  maxStaticGapSec: number = 3
+): Promise<T[]> {
+  if (frames.length <= 1) return frames;
+
+  const kept: T[] = [frames[0]];
+  let previousSignature = await buildFrameSignature(frames[0].jpegBuf);
+
+  for (let i = 1; i < frames.length; i++) {
+    const frame = frames[i];
+    const signature = await buildFrameSignature(frame.jpegBuf);
+    let totalDelta = 0;
+    let changedPixels = 0;
+
+    for (let offset = 0; offset < signature.length; offset += 3) {
+      const r = Math.abs(signature[offset] - previousSignature[offset]);
+      const g = Math.abs(signature[offset + 1] - previousSignature[offset + 1]);
+      const b = Math.abs(signature[offset + 2] - previousSignature[offset + 2]);
+      totalDelta += r + g + b;
+      if (Math.max(r, g, b) >= 20) changedPixels++;
+    }
+
+    const pixelCount = signature.length / 3;
+    const meanDelta = totalDelta / (signature.length * 255);
+    const changedRatio = changedPixels / pixelCount;
+    const staticGap = frame.timestamp - kept[kept.length - 1].timestamp;
+    const isNearDuplicate = meanDelta < 0.012 && changedRatio < 0.008;
+
+    if (!isNearDuplicate || staticGap >= maxStaticGapSec) {
+      kept.push(frame);
+      previousSignature = signature;
+    }
+  }
+
+  return kept;
+}
 
 async function getVideoResolution(videoPath: string): Promise<{ width: number; height: number }> {
   const { stdout } = await execAsync(
@@ -22,7 +129,12 @@ export async function extractFrameAt(
   videoPath: string,
   timestamp: number
 ): Promise<{ jpegBuf: Buffer; width: number; height: number } | null> {
-  const tempDir = path.join(process.cwd(), 'storage', 'temp', `grid_frame_${Date.now()}`);
+  const tempDir = path.join(
+    process.cwd(),
+    'storage',
+    'temp',
+    `grid_frame_${Date.now()}_${extractFrameCounter++}_${Math.random().toString(36).slice(2, 8)}`
+  );
   fs.mkdirSync(tempDir, { recursive: true });
   const outputPath = path.join(tempDir, 'frame.jpg');
 
@@ -50,38 +162,100 @@ export const MAX_GRID_ROWS = 16;
 export const MAX_GRID_CELLS = MAX_GRID_COLS * MAX_GRID_ROWS; // 256
 
 /**
- * Use FFmpeg scene detection to get scene boundary timestamps.
- * If > maxScenes, increase threshold and retry.
+ * Minimum scene count based on clip duration.
+ * Short clips need finer granularity for shot segmentation.
+ */
+export function computeMinScenes(durationSec: number, maxScenes: number): number {
+  if (durationSec <= 15) {
+    return Math.min(maxScenes, Math.max(24, Math.ceil(durationSec * 4)));
+  }
+  if (durationSec <= 60) {
+    return Math.min(maxScenes, Math.max(30, Math.ceil(durationSec * 2)));
+  }
+  if (durationSec <= 180) {
+    return Math.min(maxScenes, Math.max(60, Math.ceil(durationSec)));
+  }
+  if (durationSec <= 600) {
+    return Math.min(maxScenes, Math.max(90, Math.ceil(durationSec * 0.4)));
+  }
+  return Math.min(maxScenes, 120);
+}
+
+/**
+ * Fill gaps with uniform sampling when scene detection alone cannot reach target count.
+ */
+function supplementUniformSamples(
+  existing: number[],
+  duration: number,
+  targetCount: number,
+  maxScenes: number
+): number[] {
+  const target = Math.min(maxScenes, targetCount);
+  if (existing.length >= target) return existing;
+
+  const samples = Array.from(new Set([0, ...existing]))
+    .filter(t => t >= 0 && t < duration)
+    .sort((a, b) => a - b);
+
+  // Repeatedly split the largest uncovered time span. This preserves every real
+  // cut and gives the VL grid even coverage without exceeding its target size.
+  while (samples.length < target) {
+    let largestGap = -1;
+    let insertAfter = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const end = i + 1 < samples.length ? samples[i + 1] : duration;
+      const gap = end - samples[i];
+      if (gap > largestGap) {
+        largestGap = gap;
+        insertAfter = i;
+      }
+    }
+
+    if (largestGap <= 0.02) break;
+    const end = insertAfter + 1 < samples.length ? samples[insertAfter + 1] : duration;
+    samples.splice(insertAfter + 1, 0, (samples[insertAfter] + end) / 2);
+  }
+
+  return samples;
+}
+
+/**
+ * Use adaptive scene boundaries, then fill uncovered spans to the duration-based
+ * grid density. Short clips deliberately receive more samples per second.
  * Returns array of timestamps for keyframes (scene starts).
  */
 export async function getSceneTimestamps(
   videoPath: string,
   maxScenes: number = MAX_GRID_CELLS,
 ): Promise<number[]> {
-  let threshold = 0.3;
-  const MAX_THRESHOLD = 0.95;
-  const THRESHOLD_STEP = 0.05;
+  const duration = await getVideoDuration(videoPath);
+  const minScenes = computeMinScenes(duration, maxScenes);
 
-  while (true) {
-    const boundaries = await detectSceneChanges(videoPath, threshold);
-    const numScenes = boundaries.length - 1; // boundaries includes 0 and duration
+  const threshold = duration <= 180 ? 0.22 : 0.3;
+  const boundaries = await detectSceneChanges(videoPath, threshold);
+  let timestamps = boundaries.slice(0, -1);
 
-    console.log(`Scene detection: threshold=${threshold.toFixed(2)} → ${numScenes} scenes (boundaries=${boundaries.length})`);
+  console.log(
+    `Scene detection: single adaptive scan produced ${timestamps.length} scenes ` +
+    `(min=${minScenes}, max=${maxScenes})`
+  );
 
-    if (numScenes <= maxScenes) {
-      // Return scene start timestamps (excluding the final duration boundary)
-      return boundaries.slice(0, -1);
-    }
-
-    if (threshold >= MAX_THRESHOLD) {
-      throw new Error(
-        `Scene detection produced ${numScenes} scenes, exceeding max grid capacity ${maxScenes} even at threshold=${threshold.toFixed(2)}`
-      );
-    }
-
-    threshold = Math.min(MAX_THRESHOLD, threshold + THRESHOLD_STEP);
-    console.log(`Scene detection: too many scenes (${numScenes} > ${maxScenes}), retrying with threshold=${threshold.toFixed(2)}`);
+  if (timestamps.length > maxScenes) {
+    const source = timestamps;
+    timestamps = Array.from({ length: maxScenes }, (_, i) => {
+      const index = Math.min(source.length - 1, Math.floor(i * source.length / maxScenes));
+      return source[index];
+    });
+    console.log(`Scene detection: reduced ${source.length} → ${timestamps.length} samples for grid capacity`);
   }
+
+  if (timestamps.length < minScenes) {
+    const supplemented = supplementUniformSamples(timestamps, duration, minScenes, maxScenes);
+    console.log(`Scene detection: supplemented ${timestamps.length} → ${supplemented.length} scenes`);
+    return supplemented;
+  }
+
+  return timestamps;
 }
 
 /**
@@ -254,7 +428,9 @@ export async function generateVideoGrid(
     throw new Error('Failed to extract any frames for grid');
   }
 
-  const numImages = frames.length;
+  const uniqueFrames = await removeNearDuplicateFrames(frames);
+  console.log(`Grid: visual dedupe ${frames.length} → ${uniqueFrames.length} frames`);
+  const numImages = uniqueFrames.length;
   const { cols, rows, cellSize } = calculateGridLayout(videoWidth, videoHeight, numImages, maxGridSize);
   const [cellW, cellH] = cellSize;
   console.log(`Grid: layout ${cols}x${rows}, cell ${cellW}x${cellH}`);
@@ -266,7 +442,7 @@ export async function generateVideoGrid(
   const composites: sharp.OverlayOptions[] = [];
 
   for (let i = 0; i < numImages; i++) {
-    const frame = frames[i];
+    const frame = uniqueFrames[i];
     const r = Math.floor(i / cols);
     const c = i % cols;
     const x = c * cellW + (c + 1);
@@ -304,20 +480,6 @@ export async function generateVideoGrid(
   }
 
   // Create canvas and composite all tiles
-  let gridImage = sharp({
-    create: { width: gridW, height: gridH, channels: 3, background: { r: 0, g: 0, b: 0 } },
-  });
-
-  // Apply composites in batches (sharp has limits)
-  const batchSize = 50;
-  for (let i = 0; i < composites.length; i += batchSize) {
-    const batch = composites.slice(i, i + batchSize);
-    gridImage = gridImage.composite(batch);
-  }
-
-  const finalImage = gridImage.jpeg({ quality: 90 });
-
-  // Save output
   const thumbsDir = path.join(path.dirname(videoPath), 'thumbnails');
   if (!fs.existsSync(thumbsDir)) {
     fs.mkdirSync(thumbsDir, { recursive: true });
@@ -326,7 +488,8 @@ export async function generateVideoGrid(
   const baseName = path.parse(videoPath).name;
   const outputPath = path.join(thumbsDir, `${baseName}_grid.jpg`);
 
-  await finalImage.toFile(outputPath);
+  const gridBuffer = await renderCompositeGrid(gridW, gridH, composites);
+  await sharp(gridBuffer).toFile(outputPath);
   console.log(`Grid: saved to ${outputPath}`);
 
   return outputPath;
@@ -368,23 +531,25 @@ export async function generateThumbnailFromGrid(
     throw new Error('No frames extracted from video');
   }
 
-  const numImages = frames.length;
+  const uniqueFrames = await removeNearDuplicateFrames(frames);
+  console.log(`Grid: visual dedupe ${frames.length} → ${uniqueFrames.length} frames`);
+  const numImages = uniqueFrames.length;
   const { cols, rows, cellSize } = calculateGridLayout(videoWidth, videoHeight, numImages, maxGridSize);
   const [cellW, cellH] = cellSize;
 
-  // --- Save the first keyframe as 1:1 thumbnail ---
-  const firstFrame = frames[0];
+  // --- Save a representative keyframe as 1:1 thumbnail ---
+  const thumbFrame = pickThumbnailFrame(uniqueFrames);
   const thumbSize = Math.min(cellW, cellH); // 1:1 square
   const outputDir = path.dirname(thumbnailOutputPath);
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
 
-  await sharp(firstFrame.jpegBuf)
+  await sharp(thumbFrame.jpegBuf)
     .resize(thumbSize, thumbSize, { fit: 'cover' })
     .jpeg({ quality: 90 })
     .toFile(thumbnailOutputPath);
-  console.log(`Thumbnail (1:1 from grid): saved to ${thumbnailOutputPath}`);
+  console.log(`Thumbnail (1:1 from grid): saved to ${thumbnailOutputPath} @ ${thumbFrame.timestamp.toFixed(2)}s`);
 
   // --- Generate the full grid image ---
   const gridW = cols * cellW + (cols + 1);
@@ -393,7 +558,7 @@ export async function generateThumbnailFromGrid(
   const composites: sharp.OverlayOptions[] = [];
 
   for (let i = 0; i < numImages; i++) {
-    const frame = frames[i];
+    const frame = uniqueFrames[i];
     const r = Math.floor(i / cols);
     const c = i % cols;
     const x = c * cellW + (c + 1);
@@ -424,16 +589,6 @@ export async function generateThumbnailFromGrid(
     }
   }
 
-  let gridImage = sharp({
-    create: { width: gridW, height: gridH, channels: 3, background: { r: 0, g: 0, b: 0 } },
-  });
-
-  const batchSize = 50;
-  for (let i = 0; i < composites.length; i += batchSize) {
-    const batch = composites.slice(i, i + batchSize);
-    gridImage = gridImage.composite(batch);
-  }
-
   const thumbsDir = path.join(path.dirname(videoPath), 'thumbnails');
   if (!fs.existsSync(thumbsDir)) {
     fs.mkdirSync(thumbsDir, { recursive: true });
@@ -442,8 +597,9 @@ export async function generateThumbnailFromGrid(
   const baseName = path.parse(videoPath).name;
   const gridOutputPath = path.join(thumbsDir, `${baseName}_grid.jpg`);
 
-  await gridImage.jpeg({ quality: 90 }).toFile(gridOutputPath);
-  console.log(`Grid: saved to ${gridOutputPath}`);
+  const gridBuffer = await renderCompositeGrid(gridW, gridH, composites);
+  await sharp(gridBuffer).toFile(gridOutputPath);
+  console.log(`Grid: saved to ${gridOutputPath} (${composites.length} tiles, ${gridBuffer.length} bytes)`);
 
   return { gridPath: gridOutputPath, thumbnailPath: thumbnailOutputPath };
 }

@@ -217,8 +217,7 @@ export async function getVideoWithSubtitles(videoId: string): Promise<VideoMetad
     }
 
     if (subtitles.length === 0) {
-      console.log(`  Skipping ${videoId}: No subtitles available`);
-      return null;
+      console.warn(`  No subtitles available for ${videoId}, will use fallback clip strategy`);
     }
 
     return {

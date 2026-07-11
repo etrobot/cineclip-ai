@@ -524,3 +524,59 @@ export async function listChannelVideos(url: string): Promise<ChannelVideosRespo
   }
   return response.json();
 }
+
+// ─── Storyboard API ─────────────────────────────────────────────────────
+
+export interface StoryboardEntry {
+  shotNumber: number;
+  clipTitle: string;
+  shotLabel: string;
+  timeRange: string;
+  absoluteStart: number;
+  absoluteEnd: number;
+  shotType: string;
+  cameraMovement: string;
+  visualContent: string;
+  dialogue: string;
+  narrativeRole: string;
+  notes: string;
+}
+
+export interface StoryboardResult {
+  videoId: string;
+  videoTitle: string;
+  summary: string;
+  storyboard: StoryboardEntry[];
+  totalShots: number;
+  totalClips: number;
+}
+
+/**
+ * Generate a storyboard (分镜表) for a video by sending its complete subtitles
+ * and all extracted shot descriptions to the LLM.
+ *
+ * Returns 400 with a descriptive error if clips have no shots detected.
+ */
+export async function generateStoryboard(videoId: string): Promise<StoryboardResult> {
+  const response = await fetch(`${API_BASE_URL}/api/storyboard`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ videoId }),
+  });
+
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const error = await response.json();
+      message = error.error || message;
+    } catch {
+      const text = await response.text();
+      message = text.slice(0, 200) || message;
+    }
+    throw new Error(message);
+  }
+
+  return response.json();
+}
