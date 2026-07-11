@@ -39,6 +39,7 @@ export interface ClipItem {
   end: number;
   subtitles?: SubtitleItem[];
   sourceUrl?: string; // For non-YouTube videos (e.g. X posts)
+  postUrl?: string; // Original video URL
   // render state
   status: ClipStatus;
   progress: number;
@@ -52,6 +53,7 @@ export interface VideoGroup {
   videoId: string;
   title: string;
   thumbnail: string;
+  postUrl?: string;
   items: ClipItem[];
 }
 
@@ -115,6 +117,7 @@ function groupClipsByVideoFlat(items: ClipItem[]): VideoGroup[] {
         videoId: item.videoId,
         title: item.title,
         thumbnail: item.renderedThumbnailUrl || item.thumbnail,
+        postUrl: item.postUrl,
         items: [],
       });
     }
@@ -138,6 +141,7 @@ function mapListClipsToItems(clips: ListClipItem[]): ClipItem[] {
     stage: "",
     clipUrl: c.clipUrl,
     renderedThumbnailUrl: c.thumbnailUrl,
+    postUrl: c.postUrl,
   }));
 }
 
@@ -595,6 +599,7 @@ export default function App() {
           onRetryClip={handleRetryClip}
           subtitles={row.items[0]?.subtitles}
           videoId={row.videoId}
+          postUrl={row.postUrl}
           shotQueueItems={shotQueueItems}
           onEnqueueShot={enqueueShot}
           onRetryShot={retryShot}

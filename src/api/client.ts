@@ -328,6 +328,7 @@ export interface ListClipItem {
   duration: string;
   title: string;
   size: number;
+  postUrl: string;
 }
 
 export interface ListClipsResponse {

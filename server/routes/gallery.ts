@@ -17,6 +17,7 @@ function buildGalleryResponse(posts: any[]) {
     videoId: post.author?.platformId || String(post.id),
     title: post.title || "Untitled",
     thumbnailUrl: post.coverImageUrl || "",
+    postUrl: post.postUrl || "",
     clips: [...(post.clips ?? [])]
       .sort((a: any, b: any) => {
         const aStart = a.startTime ?? 0;

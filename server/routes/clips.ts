@@ -72,6 +72,7 @@ clipsRoute.get("/list", async (_req, res) => {
       duration: string;
       title: string;
       size: number;
+      postUrl: string;
     }[] = [];
 
     for (const post of posts) {
@@ -95,6 +96,7 @@ clipsRoute.get("/list", async (_req, res) => {
           duration: clip.duration || "0:00",
           title: clip.title || clip.fileName,
           size: clip.size || 0,
+          postUrl: post.postUrl || "",
         });
       }
     }

@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from "motion/react";
-import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw, Grid2x2, Trash2 as TrashVideo, Table2 } from "lucide-react";
+import { Download, Play, Loader2, Trash2, Film, ChevronDown, ChevronUp, RotateCcw, Grid2x2, Trash2 as TrashVideo, Table2, ExternalLink } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import { API_BASE_URL, listShots, getServerConfig, type ShotInfo, type SubtitleItem } from "../api/client";
 import type { ClipItem } from "../App";
@@ -415,6 +415,7 @@ interface ClipRowProps {
   videoThumbnail: string;
   clips: ClipItem[];
   videoId: string;
+  postUrl?: string;
   onDeleteClip?: (clipId: string) => void;
   onDeleteVideo?: (videoId: string) => void;
   onRetryClip?: (clipId: string) => void;
@@ -424,7 +425,7 @@ interface ClipRowProps {
   onRetryShot: (clipId: string) => void;
 }
 
-export function ClipRow({ videoTitle, videoThumbnail, clips, videoId, onDeleteClip, onDeleteVideo, onRetryClip, subtitles, shotQueueItems, onEnqueueShot, onRetryShot }: ClipRowProps) {
+export function ClipRow({ videoTitle, videoThumbnail, clips, videoId, postUrl, onDeleteClip, onDeleteVideo, onRetryClip, subtitles, shotQueueItems, onEnqueueShot, onRetryShot }: ClipRowProps) {
   // Pre-compute pending items list for position calculation
   const pendingItems = shotQueueItems.filter((item) => item.status === "pending");
   const [showStoryboard, setShowStoryboard] = useState(false);
@@ -440,6 +441,17 @@ export function ClipRow({ videoTitle, videoThumbnail, clips, videoId, onDeleteCl
         <h2 className="text-lg font-bold text-white tracking-tight line-clamp-1">
           {videoTitle}
         </h2>
+        {postUrl && (
+          <a
+            href={postUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400 hover:text-blue-400 transition-colors"
+            title="打开原视频"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </a>
+        )}
         <div className="flex items-center gap-1.5 ml-auto">
           <button
             onClick={() => setShowStoryboard(true)}
