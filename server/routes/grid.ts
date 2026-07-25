@@ -32,12 +32,14 @@ gridRoute.post('/', async (req, res) => {
       return res.status(404).json({ error: `Clip file not found: ${clipFileName}` });
     }
 
-    // Check if grid image already exists (cache)
-    const gridFileName = path.parse(clipFileName).name + '_grid.jpg';
-    const gridPath = path.join(process.cwd(), 'clips', 'thumbnails', gridFileName);
+    // Extract videoId from clip filename: "{videoId}_{start}_{end}.mp4" → videoId
+    const baseName = path.parse(clipFileName).name;
+    const videoId = baseName.replace(/_[-\dp]+$/, '');
+    const gridFileName = `${baseName}_grid.jpg`;
+    const gridPath = path.join(process.cwd(), 'clips', 'thumbnails', videoId, gridFileName);
 
     if (fs.existsSync(gridPath)) {
-      const gridUrl = `/api/clips/thumbnails/${gridFileName}`;
+      const gridUrl = `/api/clips/thumbnails/${videoId}/${gridFileName}`;
       return res.json({ gridUrl });
     }
 
@@ -46,7 +48,7 @@ gridRoute.post('/', async (req, res) => {
       maxGridSize,
     });
 
-    const gridUrl = `/api/clips/thumbnails/${gridFileName}`;
+    const gridUrl = `/api/clips/thumbnails/${videoId}/${gridFileName}`;
     console.log(`Grid generated: ${gridUrl}`);
     res.json({ gridUrl });
   } catch (error: any) {

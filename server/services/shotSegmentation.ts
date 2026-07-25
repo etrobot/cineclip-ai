@@ -639,17 +639,18 @@ export async function segmentShots(
   // Analyze shots
   const { shots, gridBuf } = await analyzeShots(clipPath, analysisCtx);
 
-  // Save grid image to file
+  // Save grid image to file under clips/thumbnails/{videoId}/
   let gridUrl = '';
   if (gridBuf.length > 0) {
-    const shotsDir = path.join(process.cwd(), 'clips', 'shots');
-    if (!fs.existsSync(shotsDir)) {
-      fs.mkdirSync(shotsDir, { recursive: true });
+    const videoId = clipId.replace(/_[-\dp]+$/, '');
+    const thumbsDir = path.join(process.cwd(), 'clips', 'thumbnails', videoId);
+    if (!fs.existsSync(thumbsDir)) {
+      fs.mkdirSync(thumbsDir, { recursive: true });
     }
     const gridFileName = `${clipId}_grid.jpg`;
-    const gridPath = path.join(shotsDir, gridFileName);
+    const gridPath = path.join(thumbsDir, gridFileName);
     fs.writeFileSync(gridPath, gridBuf);
-    gridUrl = `/api/clips/shots/${gridFileName}`;
+    gridUrl = `/api/clips/thumbnails/${videoId}/${gridFileName}`;
     console.log(`Grid image saved: ${gridPath}`);
   }
 

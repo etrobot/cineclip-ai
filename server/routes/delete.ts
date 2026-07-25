@@ -62,8 +62,8 @@ deleteRoute.post('/video/:videoId', async (req, res) => {
 
       // Delete clip thumbnail
       if (clip.thumbnailUrl) {
-        const thumbFileName = path.basename(clip.thumbnailUrl);
-        const thumbFilePath = path.join(thumbsDir, thumbFileName);
+        const thumbRelPath = clip.thumbnailUrl.replace('/api/clips/thumbnails/', '');
+        const thumbFilePath = path.join(thumbsDir, thumbRelPath);
         if (fs.existsSync(thumbFilePath)) {
           fs.unlinkSync(thumbFilePath);
           deletedFiles.push(thumbFilePath);
@@ -113,8 +113,9 @@ deleteRoute.post('/video/:videoId', async (req, res) => {
       }
     }
 
-    // Delete grid image
-    const gridPath = path.join(shotsDir, `${sourceClipId}_grid.jpg`);
+    // Delete grid image (now stored under clips/thumbnails/{videoId}/)
+    const videoId = sourceClipId.replace(/_[-\dp]+$/, '');
+    const gridPath = path.join(thumbsDir, videoId, `${sourceClipId}_grid.jpg`);
     if (fs.existsSync(gridPath)) {
       fs.unlinkSync(gridPath);
       deletedFiles.push(gridPath);

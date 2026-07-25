@@ -55,7 +55,7 @@ renderRoute.post('/', async (req, res) => {
 
     const videosDir = path.join(process.cwd(), 'videos');
     const clipsDir = path.join(process.cwd(), 'clips');
-    const thumbsDir = path.join(process.cwd(), 'clips', 'thumbnails');
+    const thumbsDir = path.join(process.cwd(), 'clips', 'thumbnails', videoId);
 
     // Ensure directories exist
     if (!fs.existsSync(clipsDir)) {
@@ -113,7 +113,7 @@ renderRoute.post('/', async (req, res) => {
     // Complete
     progressEmitter.emitProgress(jid, 'complete', 100, 'Render complete');
 
-    const thumbnailUrl = `/api/clips/thumbnails/${thumbFileName}`;
+    const thumbnailUrl = `/api/clips/thumbnails/${videoId}/${thumbFileName}`;
     const clipFileName = path.basename(outputPath);
     const clipUrl = `/api/clips/${clipFileName}`;
 

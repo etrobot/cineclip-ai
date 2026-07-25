@@ -480,12 +480,14 @@ export async function generateVideoGrid(
   }
 
   // Create canvas and composite all tiles
-  const thumbsDir = path.join(path.dirname(videoPath), 'thumbnails');
+  // Extract videoId from clip filename: "{videoId}_{start}_{end}.mp4" → videoId
+  const baseName = path.parse(videoPath).name;
+  const videoId = baseName.replace(/_[-\dp]+$/, ''); // strip last _{start} or _{start}_{end}
+  const thumbsDir = path.join(path.dirname(videoPath), 'thumbnails', videoId);
   if (!fs.existsSync(thumbsDir)) {
     fs.mkdirSync(thumbsDir, { recursive: true });
   }
 
-  const baseName = path.parse(videoPath).name;
   const outputPath = path.join(thumbsDir, `${baseName}_grid.jpg`);
 
   const gridBuffer = await renderCompositeGrid(gridW, gridH, composites);
@@ -589,12 +591,14 @@ export async function generateThumbnailFromGrid(
     }
   }
 
-  const thumbsDir = path.join(path.dirname(videoPath), 'thumbnails');
+  // Extract videoId from clip filename: "{videoId}_{start}_{end}.mp4" → videoId
+  const baseName = path.parse(videoPath).name;
+  const videoId = baseName.replace(/_[-\dp]+$/, '');
+  const thumbsDir = path.join(path.dirname(videoPath), 'thumbnails', videoId);
   if (!fs.existsSync(thumbsDir)) {
     fs.mkdirSync(thumbsDir, { recursive: true });
   }
 
-  const baseName = path.parse(videoPath).name;
   const gridOutputPath = path.join(thumbsDir, `${baseName}_grid.jpg`);
 
   const gridBuffer = await renderCompositeGrid(gridW, gridH, composites);
